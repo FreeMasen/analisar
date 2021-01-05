@@ -1,0 +1,11 @@
+[package]
+name = "analisar"
+version = "0.1.0"
+authors = ["rfm <r@robertmasen.pizza>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bstr = "0.2"
+lex_lua = "0.1"
