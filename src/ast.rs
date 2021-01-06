@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, path::Prefix};
 
 use bstr::BStr;
 
@@ -20,7 +20,7 @@ pub enum Statement<'a> {
     Break,
     GoTo(Name<'a>),
     Do {
-        block: Box<Block<'a>>
+        block: Box<Block<'a>>,
     },
     While {
         exp: Expression<'a>,
@@ -28,7 +28,7 @@ pub enum Statement<'a> {
     },
     Repeat {
         block: Box<Block<'a>>,
-        exp: Expression<'a>, 
+        exp: Expression<'a>,
     },
     If(If<'a>),
     For(ForLoop<'a>),
@@ -38,32 +38,36 @@ pub enum Statement<'a> {
         name: FuncName<'a>,
         body: FuncBody<'a>,
     },
-    AttrNameList {
-        
-    }
+    AttrNameList {},
 }
+
 
 struct VarList<'a>(Vec<Var<'a>>);
 pub enum Var<'a> {
     Name(Name<'a>),
     Index {
         prefix: Box<PrefixExp<'a>>,
-    }
+        index: Box<Expression<'a>>,
+    },
+    Field {
+        prefix: Box<PrefixExp<'a>>,
+        field: Name<'a>,
+    },
 }
 
-enum PrefixExp<'a> {
+pub enum PrefixExp<'a> {
     Var(Var<'a>),
     FunctionCall(FunctionCall<'a>),
-    Exp(Expression<'a>)
+    Exp(Box<Expression<'a>>),
 }
 
-struct FunctionCall<'a> {
-    prefix: Box<PrefixExp<'a>>,
-    method: Name<'a>,
-    args: Args<'a>,
+pub struct FunctionCall<'a> {
+    pub prefix: Box<PrefixExp<'a>>,
+    pub method: Name<'a>,
+    pub args: Args<'a>,
 }
 
-enum Args<'a> {
+pub enum Args<'a> {
     ExpList(Vec<Expression<'a>>),
     Table,
     String,
@@ -118,13 +122,40 @@ pub enum Expression<'a> {
     UnaryOp {
         op: UnaryOperator,
         exp: Box<Expression<'a>>,
+    },
+    Prefix(PrefixExp<'a>),
+    Suffixed(Box<Suffixed<'a>>),
+}
+
+impl<'a> Expression<'a> {
+    pub fn binary(left: Expression<'a>, op: BinaryOperator, right: Expression<'a>) -> Self {
+        Self::BinOp {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        }
+    }
+
+    pub fn unary(op: UnaryOperator, exp: Expression<'a>) -> Self {
+        Self::UnaryOp {
+            op,
+            exp: Box::new(exp),
+        }
     }
 }
 
+pub struct Suffixed<'a> {
+    pub subject: Expression<'a>,
+    pub property: Expression<'a>,
+    pub computed: bool,
+    pub method: bool,
+}
+
+
 pub struct NameList<'a>(pub Vec<Name<'a>>);
 
-pub struct LiteralString<'a>(Cow<'a, BStr>);
-pub struct Numeral<'a>(Cow<'a, str>);
+pub struct LiteralString<'a>(pub Cow<'a, BStr>);
+pub struct Numeral<'a>(pub Cow<'a, str>);
 
 pub struct FuncBody<'a> {
     pub args: NameList<'a>,
@@ -136,15 +167,32 @@ pub struct Table<'a> {
 }
 
 pub struct Field<'a> {
-    name: Expression<'a>
+    name: Expression<'a>,
 }
 
-pub struct Name<'a>(pub Cow<'a, str>);
+pub struct Name<'a> {
+    pub name: Cow<'a, str>,
+    pub attr: Option<Cow<'a, str>>,
+}
+
+impl<'a> Name<'a> {
+    pub fn new(name: Cow<'a, str>) -> Self {
+        Self { name, attr: None }
+    }
+
+    pub fn new_with_attr(name: Cow<'a, str>, attr: Cow<'a, str>) -> Self {
+        Self {
+            name,
+            attr: Some(attr),
+        }
+    }
+}
 
 pub enum FieldSeperator {
     Comma,
     Colon,
 }
+#[derive(Debug, Clone, Copy)]
 pub enum BinaryOperator {
     Add,
     Subtract,
@@ -167,7 +215,24 @@ pub enum BinaryOperator {
     NotEqual,
     And,
     Or,
-    Not,
+}
+
+impl BinaryOperator {
+    pub fn priority(self) -> (u8, u8) {
+        match self {
+            Self::Power => (14, 13),
+            Self::Multiply | Self::Modulo | Self::Divide | Self::FloorDivide => (11, 11),
+            Self::Add | Self::Subtract => (10, 10),
+            Self::Concatenate => (9, 8),
+            Self::RightShift | Self::LeftShift => (7, 7),
+            Self::BitwiseAnd => (6, 6),
+            Self::BitwiseXor => (5, 5),
+            Self::BitwiseOr => (4, 4),
+            Self::GreaterThan | Self::GreaterThanEqual | Self::LessThan | Self::LessThanEqual | Self::Equal | Self::NotEqual => (3, 3),
+            Self::And => (2, 2),
+            Self::Or => (1, 1),
+        }
+    }
 }
 
 pub enum UnaryOperator {
