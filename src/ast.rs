@@ -5,15 +5,17 @@ use bstr::BStr;
 pub struct Chunk<'a>(pub Block<'a>);
 
 pub struct Block<'a> {
-    pub statement: Statement<'a>,
-    pub retstat: Option<RetStatement<'a>>,
+    pub statements: Vec<Statement<'a>>,
+    pub ret_stat: Option<RetStatement<'a>>,
 }
 
 pub enum Statement<'a> {
+    Empty,
+    Expression(Expression<'a>),
     Assignment {
         local: bool,
-        name_list: NameList<'a>,
-        exp_list: Vec<Expression<'a>>,
+        targets: Vec<Expression<'a>>,
+        values: Vec<Expression<'a>>,
     },
     FunctionCall,
     Label(Name<'a>),
@@ -39,8 +41,8 @@ pub enum Statement<'a> {
         body: FuncBody<'a>,
     },
     AttrNameList {},
+    Return(RetStatement<'a>),
 }
-
 
 struct VarList<'a>(Vec<Var<'a>>);
 pub enum Var<'a> {
@@ -63,14 +65,14 @@ pub enum PrefixExp<'a> {
 
 pub struct FunctionCall<'a> {
     pub prefix: Box<PrefixExp<'a>>,
-    pub method: Name<'a>,
     pub args: Args<'a>,
+    pub method: bool,
 }
 
 pub enum Args<'a> {
     ExpList(Vec<Expression<'a>>),
-    Table,
-    String,
+    Table(Table<'a>),
+    String(LiteralString<'a>),
 }
 
 pub struct FuncName<'a> {
@@ -95,6 +97,7 @@ pub struct ForLoop<'a> {
     pub init: Expression<'a>,
     pub limit: Expression<'a>,
     pub step: Option<Expression<'a>>,
+    pub block: Box<Block<'a>>,
 }
 
 pub struct ForInLoop<'a> {
@@ -111,6 +114,7 @@ pub enum Expression<'a> {
     True,
     Numeral(Numeral<'a>),
     LiteralString(LiteralString<'a>),
+    Name(Name<'a>),
     VarArgs,
     FunctionDef(FuncBody<'a>),
     TableCtor(Box<Table<'a>>),
@@ -151,23 +155,31 @@ pub struct Suffixed<'a> {
     pub method: bool,
 }
 
-
 pub struct NameList<'a>(pub Vec<Name<'a>>);
+
+pub struct ParList<'a> {
+    pub names: NameList<'a>,
+    pub var_args: bool,
+}
 
 pub struct LiteralString<'a>(pub Cow<'a, BStr>);
 pub struct Numeral<'a>(pub Cow<'a, str>);
 
 pub struct FuncBody<'a> {
-    pub args: NameList<'a>,
-    pub var_args: bool,
+    pub par_list: ParList<'a>,
+    pub block: Block<'a>,
 }
 
 pub struct Table<'a> {
     pub field_list: Vec<Field<'a>>,
 }
 
-pub struct Field<'a> {
-    name: Expression<'a>,
+pub enum Field<'a> {
+    Record {
+        name: Expression<'a>,
+        value: Expression<'a>,
+    },
+    List(Expression<'a>),
 }
 
 pub struct Name<'a> {
@@ -228,7 +240,12 @@ impl BinaryOperator {
             Self::BitwiseAnd => (6, 6),
             Self::BitwiseXor => (5, 5),
             Self::BitwiseOr => (4, 4),
-            Self::GreaterThan | Self::GreaterThanEqual | Self::LessThan | Self::LessThanEqual | Self::Equal | Self::NotEqual => (3, 3),
+            Self::GreaterThan
+            | Self::GreaterThanEqual
+            | Self::LessThan
+            | Self::LessThanEqual
+            | Self::Equal
+            | Self::NotEqual => (3, 3),
             Self::And => (2, 2),
             Self::Or => (1, 1),
         }

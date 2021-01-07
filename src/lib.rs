@@ -1,6 +1,10 @@
 use std::{borrow::Cow, todo};
 
-use ast::{Args, BinaryOperator, ElseIf, Expression, ForInLoop, ForLoop, FuncBody, FuncName, FunctionCall, If, LiteralString, Name, NameList, Numeral, PrefixExp, RetStatement, Statement, Suffixed, UnaryOperator, Var};
+use ast::{
+    Args, BinaryOperator, ElseIf, Expression, Field, ForInLoop, ForLoop, FuncBody, FuncName,
+    FunctionCall, If, LiteralString, Name, NameList, Numeral, ParList, PrefixExp, RetStatement,
+    Statement, Suffixed, Table, UnaryOperator, Var,
+};
 use lex_lua::{Keyword, Lexer, Punct, Token};
 
 mod ast;
@@ -8,13 +12,19 @@ mod ast;
 pub struct Parser<'a> {
     lex: Lexer<'a>,
     look_ahead: Option<lex_lua::Token<'a>>,
+    look_ahead2: Option<lex_lua::Token<'a>>,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(bytes: &'a [u8]) -> Self {
         let mut lex = Lexer::new(bytes);
         let look_ahead = lex.next();
-        Self { lex, look_ahead }
+        let look_ahead2 = lex.next();
+        Self {
+            lex,
+            look_ahead,
+            look_ahead2,
+        }
     }
 
     pub fn chunk(&mut self) -> ast::Chunk<'a> {
@@ -22,19 +32,29 @@ impl<'a> Parser<'a> {
     }
 
     pub fn block(&mut self) -> ast::Block<'a> {
-        let statement = self.statement();
-        let retstat = if matches!(self.look_ahead, Some(Token::Keyword(Keyword::Return))) {
-            let _return = self.next_token();
-            let exps = self.exp_list();
-            Some(RetStatement(exps))
-        } else {
-            None
-        };
-        ast::Block { statement, retstat }
+        let mut statements = Vec::new();
+        let mut ret_stat = None;
+        while !self.at_block_end() {
+            if matches!(self.look_ahead, Some(Token::Keyword(Keyword::Return))) {
+                ret_stat = Some(self.ret_stat());
+                break;
+            } else {
+                statements.push(self.statement());
+            }
+        }
+
+        ast::Block {
+            statements,
+            ret_stat,
+        }
     }
 
     pub fn statement(&mut self) -> Statement<'a> {
         match self.look_ahead {
+            Some(Token::Punct(Punct::SemiColon)) => {
+                let _ = self.next_token();
+                Statement::Empty
+            }
             Some(Token::Keyword(Keyword::Break)) => self.break_stmt(),
             Some(Token::Keyword(Keyword::GoTo)) => self.go_to(),
             Some(Token::Keyword(Keyword::Do)) => self.do_stmt(),
@@ -53,20 +73,57 @@ impl<'a> Parser<'a> {
             }
             Some(Token::Punct(Punct::DoubleColon)) => self.label(),
             Some(Token::Name(_)) => self.assignment(false),
-            _ => panic!("Unknown lookahead: {:?}", self.look_ahead),
+            Some(Token::Keyword(Keyword::Return)) => {
+                let _return = self.next_token();
+                Statement::Return(self.ret_stat())
+            }
+            _ => self.exp_stat(),
+        }
+    }
+
+    fn ret_stat(&mut self) -> RetStatement<'a> {
+        let _return = self.next_token();
+        let exps = self.exp_list();
+        RetStatement(exps)
+    }
+
+    fn exp_stat(&mut self) -> Statement<'a> {
+        let base = self.suffixed_exp();
+        if matches!(
+            self.look_ahead,
+            Some(Token::Punct(Punct::Equal)) | Some(Token::Punct(Punct::Comma))
+        ) {
+            self.assign_cont(false, base)
+        } else {
+            // TODO Validate function call
+            Statement::Expression(base)
         }
     }
 
     pub fn assignment(&mut self, local: bool) -> Statement<'a> {
-        todo!()
+        let start = self.suffixed_exp();
+        self.assign_cont(local, start)
     }
 
-    pub fn function_call(&mut self) -> Statement<'a> {
-        todo!()
+    pub fn assign_cont(&mut self, local: bool, start: Expression<'a>) -> Statement<'a> {
+        let mut targets = vec![start];
+        while self.eat_punct(Punct::Comma) {
+            targets.push(self.suffixed_exp())
+        }
+        assert!(self.eat_punct(Punct::Equal));
+        let values = self.exp_list();
+        Statement::Assignment {
+            local,
+            targets,
+            values,
+        }
     }
 
     pub fn label(&mut self) -> Statement<'a> {
-        todo!()
+        let _colons = self.next_token();
+        let name = self.name();
+        let _colons = self.next_token();
+        Statement::Label(name)
     }
 
     pub fn break_stmt(&mut self) -> Statement<'a> {
@@ -152,6 +209,9 @@ impl<'a> Parser<'a> {
     fn for_loop(&mut self) -> Statement<'a> {
         let _for = self.next_token();
         let name = self.name();
+        if !matches!(self.look_ahead, Some(Token::Punct(Punct::Equal))) {
+            return self.for_in_loop(name);
+        }
         let _eq = self.next_token();
         let exp = self.exp();
         let _comma = self.next_token();
@@ -170,12 +230,13 @@ impl<'a> Parser<'a> {
             init: exp,
             limit: exp2,
             step: exp3,
+            block: Box::new(block),
         })
     }
 
-    fn for_in_loop(&mut self) -> Statement<'a> {
+    fn for_in_loop(&mut self, first_name: Name<'a>) -> Statement<'a> {
         let _for = self.next_token();
-        let mut name_list = self.name_list();
+        let name_list = self.name_list_cont(first_name);
         let _in = self.next_token();
         let exp_list = self.exp_list();
         let _do = self.next_token();
@@ -187,10 +248,15 @@ impl<'a> Parser<'a> {
             block: Box::new(block),
         })
     }
+
     fn name_list(&mut self) -> NameList<'a> {
-        let mut ret = Vec::new();
         let name = self.name();
-        ret.push(name);
+        self.name_list_cont(name)
+    }
+
+    fn name_list_cont(&mut self, first_name: Name<'a>) -> NameList<'a> {
+        let mut ret = Vec::new();
+        ret.push(first_name);
         while matches!(self.look_ahead, Some(Token::Punct(Punct::Comma))) {
             let _comma = self.next_token();
             let name = self.name();
@@ -226,11 +292,62 @@ impl<'a> Parser<'a> {
     }
 
     pub fn func_body(&mut self) -> FuncBody<'a> {
-        todo!()
+        let _paren = self.next_token();
+        let par_list = self.par_list();
+        let _paren = self.next_token();
+        let block = self.block();
+        let _end = self.next_token();
+        FuncBody { par_list, block }
     }
 
     fn func_args(&mut self) -> Args<'a> {
-        todo!()
+        match &self.look_ahead {
+            Some(Token::Punct(Punct::OpenParen)) => {
+                let _paren = self.next_token();
+                let args = if matches!(self.look_ahead, Some(Token::Punct(Punct::CloseParen))) {
+                    Vec::new()
+                } else {
+                    self.exp_list()
+                };
+                let _paren = self.next_token();
+                Args::ExpList(args)
+            }
+            Some(Token::Punct(Punct::OpenBrace)) => {
+                let args = self.table_ctor();
+                Args::Table(args)
+            }
+            Some(Token::LiteralString(s)) => {
+                let arg = LiteralString(s.clone());
+                let _s = self.next_token();
+                Args::String(arg)
+            }
+            _ => panic!("Invalid func args"),
+        }
+    }
+
+    pub fn par_list(&mut self) -> ParList<'a> {
+        let mut names = Vec::new();
+        let var_args = loop {
+            match &self.look_ahead {
+                Some(Token::Name(_)) => {
+                    let name = self.name();
+                    names.push(name);
+                    if !matches!(self.look_ahead, Some(Token::Punct(Punct::Comma))) {
+                        break false;
+                    }
+                    let _comma = self.next_token();
+                }
+                Some(Token::Punct(Punct::Ellipsis)) => {
+                    let _ellipsis = self.next_token();
+                    break true;
+                }
+                _ => panic!("Invalid par list"),
+            }
+        };
+        ParList {
+            names: NameList(names),
+            var_args,
+        }
     }
 
     pub fn name(&mut self) -> Name<'a> {
@@ -257,7 +374,13 @@ impl<'a> Parser<'a> {
     }
 
     pub fn exp_list(&mut self) -> Vec<Expression<'a>> {
-        todo!()
+        let first = self.exp();
+        let mut ret = vec![first];
+        while matches!(self.look_ahead, Some(Token::Punct(Punct::Comma))) {
+            let _comma = self.next_token();
+            ret.push(self.exp())
+        }
+        ret
     }
 
     fn exp(&mut self) -> Expression<'a> {
@@ -269,11 +392,11 @@ impl<'a> Parser<'a> {
             let exp = self.sub_exp(12);
             Expression::UnaryOp {
                 op,
-                exp: Box::new(exp)
+                exp: Box::new(exp),
             }
         } else {
             self.simple_exp()
-        };        
+        };
         while let Some(op) = self.try_get_binary_op(limit) {
             let right = self.sub_exp(op.priority().1);
             base = Expression::binary(base, op, right);
@@ -287,32 +410,33 @@ impl<'a> Parser<'a> {
                 let exp = Expression::Numeral(Numeral(n.clone()));
                 let _n_tok = self.next_token();
                 exp
-            },
+            }
             Token::LiteralString(s) => {
                 let exp = Expression::LiteralString(LiteralString(s.clone()));
                 let _s_tok = self.next_token();
                 exp
-            },
+            }
             Token::Keyword(Keyword::Nil) => {
                 self.next_token();
                 Expression::Nil
-            },
+            }
             Token::Keyword(Keyword::True) => {
                 self.next_token();
                 Expression::True
-            },
+            }
             Token::Keyword(Keyword::False) => {
                 self.next_token();
                 Expression::False
-            },
+            }
             Token::Punct(Punct::Ellipsis) => {
                 //TODO: validate in fn
                 self.next_token();
                 Expression::VarArgs
-            },
+            }
             Token::Punct(Punct::OpenBrace) => {
-                self.table_ctor()
-            },
+                let inner = self.table_ctor();
+                Expression::TableCtor(Box::new(inner))
+            }
             _ => self.suffixed_exp(),
         }
     }
@@ -320,22 +444,15 @@ impl<'a> Parser<'a> {
     fn suffixed_exp(&mut self) -> Expression<'a> {
         let expr = self.primary_exp();
         match &self.look_ahead {
-            Some(Token::Punct(Punct::Dot)) => {
-                self.field(expr)
-            },
-            Some(Token::Punct(Punct::OpenBracket)) => {
-                self.index(expr)
-            }
-            Some(Token::Punct(Punct::Colon)) => {
-                self.func_call(expr)
-            },
+            Some(Token::Punct(Punct::Dot)) => self.field(expr),
+            Some(Token::Punct(Punct::OpenBracket)) => self.index(expr),
+            Some(Token::Punct(Punct::Colon)) => self.func_call(expr, true),
             Some(Token::Punct(Punct::OpenParen))
             | Some(Token::Punct(Punct::OpenBrace))
             | Some(Token::LiteralString(_)) => {
-                self.func_args();
-                todo!()
+                self.func_call(expr, false)
             }
-            _ => expr
+            _ => expr,
         }
     }
 
@@ -363,8 +480,18 @@ impl<'a> Parser<'a> {
         Expression::Suffixed(Box::new(inner))
     }
 
-    fn func_call(&mut self, expr: Expression<'a>) -> Expression<'a> {
-        todo!()
+    fn func_call(&mut self, expr: Expression<'a>, method: bool) -> Expression<'a> {
+        let _paren = self.next_token();
+        let args = self.func_args();
+        let _paren = self.next_token();
+        
+        let call = FunctionCall {
+            prefix: Box::new(PrefixExp::Exp(Box::new(expr))),
+            args,
+            method,
+        };
+        let pre = PrefixExp::FunctionCall(call);
+        Expression::Prefix(pre)
     }
 
     fn primary_exp(&mut self) -> Expression<'a> {
@@ -373,32 +500,85 @@ impl<'a> Parser<'a> {
                 let _paren = self.next_token();
                 let inner = self.exp();
                 Expression::Prefix(PrefixExp::Exp(Box::new(inner)))
-            },
-            _ => todo!()
+            }
+            Some(Token::Name(n)) => {
+                let name = Name::new(n.clone());
+                let _ = self.next_token();
+                Expression::Name(name)
+            }
+            _ => panic!("Invalid primary expression"),
         }
     }
 
-    fn prefix_exp(&mut self) -> Expression<'a> {
-        if matches!(self.look_ahead, Some(Token::Punct(Punct::OpenParen))) {
-            let _paren = self.next_token();
-            let inner = self.exp();
-            let _paren = self.next_token();
-            Expression::Prefix(PrefixExp::Exp(Box::new(inner)))
+    fn table_ctor(&mut self) -> Table<'a> {
+        let _brace = self.next_token();
+        let mut field_list = Vec::new();
+        while !self.eat_punct(Punct::CloseBrace) {
+            field_list.push(self.field_init())
+        }
+        Table { field_list }
+    }
+
+    fn field_init(&mut self) -> Field<'a> {
+        match &self.look_ahead {
+            Some(Token::Name(_)) => {
+                if matches!(self.look_ahead2, Some(Token::Punct(Punct::Equal))) {
+                    self.record_field()
+                } else {
+                    self.list_field()
+                }
+            }
+            Some(Token::Punct(Punct::OpenBracket)) => self.record_field(),
+            _ => self.list_field(),
+        }
+    }
+
+    fn record_field(&mut self) -> Field<'a> {
+        let name = if matches!(&self.look_ahead, Some(Token::Name(_))) {
+            let name = self.name();
+            Expression::Name(name)
         } else {
-            todo!()
+            let _open = self.next_token();
+            let exp = self.exp();
+            let _close = self.next_token();
+            exp
+        };
+        let _eq = self.next_token();
+        Field::Record {
+            name,
+            value: self.exp()
         }
     }
 
-    fn var(&mut self) -> Var<'a> {
-        todo!()
+    fn list_field(&mut self) -> Field<'a> {
+        let exp = self.exp();
+        Field::List(exp)
     }
 
-    fn table_ctor(&mut self) -> Expression<'a> {
-        todo!()
+    fn at_block_end(&self) -> bool {
+        matches!(
+            self.look_ahead,
+            None | Some(Token::Keyword(Keyword::Else))
+                | Some(Token::Keyword(Keyword::ElseIf))
+                | Some(Token::Keyword(Keyword::End))
+        )
+    }
+
+    fn eat_punct(&mut self, p: Punct) -> bool {
+        if matches!(&self.look_ahead, p) {
+            self.next_token();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn next_token(&mut self) -> Option<Token<'a>> {
-        std::mem::replace(&mut self.look_ahead, self.lex.next())
+        use std::mem::replace;
+        replace(
+            &mut self.look_ahead,
+            replace(&mut self.look_ahead2, self.lex.next()),
+        )
     }
 
     fn try_get_unary_op(&mut self) -> Option<UnaryOperator> {
@@ -407,7 +587,7 @@ impl<'a> Parser<'a> {
             Token::Keyword(Keyword::Not) => UnaryOperator::Not,
             Token::Punct(Punct::Hash) => UnaryOperator::Length,
             Token::Punct(Punct::Tilde) => UnaryOperator::BitwiseNot,
-            _ => return None
+            _ => return None,
         };
         let _op_token = self.next_token();
         Some(op)
@@ -444,6 +624,9 @@ impl<'a> Parser<'a> {
             None
         }
     }
+}
 
-    
+#[cfg(test)]
+mod test {
+    use super::*;
 }
