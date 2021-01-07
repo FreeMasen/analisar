@@ -72,7 +72,6 @@ impl<'a> Parser<'a> {
                 }
             }
             Some(Token::Punct(Punct::DoubleColon)) => self.label(),
-            Some(Token::Name(_)) => self.assignment(false),
             Some(Token::Keyword(Keyword::Return)) => {
                 let _return = self.next_token();
                 Statement::Return(self.ret_stat())
@@ -247,11 +246,6 @@ impl<'a> Parser<'a> {
             exp_list,
             block: Box::new(block),
         })
-    }
-
-    fn name_list(&mut self) -> NameList<'a> {
-        let name = self.name();
-        self.name_list_cont(name)
     }
 
     fn name_list_cont(&mut self, first_name: Name<'a>) -> NameList<'a> {
@@ -506,7 +500,7 @@ impl<'a> Parser<'a> {
                 let _ = self.next_token();
                 Expression::Name(name)
             }
-            _ => panic!("Invalid primary expression"),
+            _ => panic!("Invalid primary expression {:?}", self.look_ahead),
         }
     }
 
@@ -628,5 +622,32 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod test {
+    use ast::Block;
+
     use super::*;
+
+    #[test]
+    fn print() {
+        let lua = "print('hello world')";
+        let mut parser = Parser::new(lua.as_bytes());
+        let block = parser.block();
+        let name = Expression::Name(Name::new(Cow::Borrowed("print")));
+        let arg = Expression::string("'hello world'");
+        let args = Args::ExpList(vec![arg]);
+        compare_blocs(block, Block {
+            statements: vec![
+                Statement::func_call(
+                    name, args
+                )
+            ],
+            ret_stat: None,
+        })
+    }
+
+    #[track_caller]
+    fn compare_blocs(test: Block, target: Block) {
+        for (lhs, rhs) in test.statements.iter().zip(target.statements.iter()) {
+            assert!(matches!(lhs, rhs), "Invalid statement, expected {:?}, found {:?}", rhs, lhs)
+        }
+    }
 }
