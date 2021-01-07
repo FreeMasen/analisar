@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 use bstr::BStr;
 
+#[derive(Debug)]
 pub struct Chunk<'a>(pub Block<'a>);
 
 #[derive(Debug)]
