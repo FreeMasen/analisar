@@ -1,9 +1,9 @@
-use std::{borrow::Cow, todo};
+use std::borrow::Cow;
 
 use ast::{
     Args, BinaryOperator, ElseIf, Expression, Field, ForInLoop, ForLoop, FuncBody, FuncName,
     FunctionCall, If, LiteralString, Name, NameList, Numeral, ParList, PrefixExp, RetStatement,
-    Statement, Suffixed, Table, UnaryOperator, Var,
+    Statement, Suffixed, Table, UnaryOperator
 };
 use lex_lua::{Keyword, Lexer, Punct, Token};
 
@@ -558,8 +558,8 @@ impl<'a> Parser<'a> {
         )
     }
 
-    fn eat_punct(&mut self, p: Punct) -> bool {
-        if matches!(&self.look_ahead, p) {
+    fn eat_punct(&mut self, _p: Punct) -> bool {
+        if matches!(&self.look_ahead, _p) {
             self.next_token();
             true
         } else {

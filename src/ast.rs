@@ -1,4 +1,4 @@
-use std::{borrow::Cow, path::Prefix};
+use std::borrow::Cow;
 
 use bstr::BStr;
 
@@ -261,11 +261,6 @@ impl<'a> Name<'a> {
     }
 }
 
-#[derive(Debug)]
-pub enum FieldSeperator {
-    Comma,
-    Colon,
-}
 #[derive(Debug, Clone, Copy)]
 pub enum BinaryOperator {
     Add,
