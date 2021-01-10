@@ -20,5 +20,11 @@ jobs:
       run: cargo build --verbose
     - name: clone lua source
       run: git clone https://github.com/lua/lua
-    - name: Run tests
-      run: cargo test --verbose
+    - name: Run cargo-tarpaulin
+      uses: actions-rs/tarpaulin@v0.1
+
+    - name: Upload to codecov.io
+      uses: codecov/codecov-action@v1.0.2
+      with:
+        token: ${{secrets.CODECOV_TOKEN}}
+    
