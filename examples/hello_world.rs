@@ -5,4 +5,3 @@ fn main() {
     let mut p = Parser::new(lua.as_bytes());
     println!("{:#?}", p.chunk());
 }
-

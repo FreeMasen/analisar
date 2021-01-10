@@ -1,25 +1,42 @@
 use std::borrow::Cow;
 
 use ast::{
-    Args, BinaryOperator, ElseIf, Expression, Field, ForInLoop, ForLoop, FuncBody, FuncName,
-    FunctionCall, If, LiteralString, Name, NameList, Numeral, ParList, PrefixExp, RetStatement,
-    Statement, Suffixed, Table, UnaryOperator
+    Args, BinaryOperator, Block, Chunk, ElseIf, Expression, Field, ForInLoop, ForLoop, FuncBody,
+    FuncName, FunctionCall, If, LiteralString, Name, NameList, Numeral, ParList, PrefixExp,
+    RetStatement, Statement, Suffixed, Table, UnaryOperator,
 };
-use lex_lua::{Keyword, Lexer, Punct, Token};
+use lex_lua::{Item, Keyword, Punct, SpannedLexer, Token};
+use log::trace;
 
 mod ast;
+pub mod error;
+pub use error::Error;
+
+type R<T> = Result<T, Error>;
 
 pub struct Parser<'a> {
-    lex: Lexer<'a>,
-    look_ahead: Option<lex_lua::Token<'a>>,
-    look_ahead2: Option<lex_lua::Token<'a>>,
+    lex: SpannedLexer<'a>,
+    look_ahead: Option<Item<'a>>,
+    look_ahead2: Option<Item<'a>>,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(bytes: &'a [u8]) -> Self {
-        let mut lex = Lexer::new(bytes);
-        let look_ahead = lex.next();
-        let look_ahead2 = lex.next();
+        let mut lex = SpannedLexer::new(bytes);
+        let mut look_ahead = None;
+        let mut look_ahead2 = None;
+        while let Some(i) = lex.next() {
+            if !matches!(i.token, Token::Comment(_)) {
+                look_ahead = Some(i);
+                break;
+            }
+        }
+        while let Some(i) = lex.next() {
+            if !matches!(i.token, Token::Comment(_)) {
+                look_ahead2 = Some(i);
+                break;
+            }
+        }
         Self {
             lex,
             look_ahead,
@@ -27,33 +44,43 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn chunk(&mut self) -> ast::Chunk<'a> {
-        ast::Chunk(self.block())
+    pub fn next(&mut self) -> Option<R<Chunk<'a>>> {
+        if self.look_ahead.is_none() {
+            return None;
+        }
+        Some(self.chunk())
     }
 
-    pub fn block(&mut self) -> ast::Block<'a> {
+    pub fn chunk(&mut self) -> R<Chunk<'a>> {
+        Ok(Chunk(self.block()?))
+    }
+
+    pub fn block(&mut self) -> R<Block<'a>> {
+        trace!("block {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let mut statements = Vec::new();
         let mut ret_stat = None;
         while !self.at_block_end() {
-            if matches!(self.look_ahead, Some(Token::Keyword(Keyword::Return))) {
-                ret_stat = Some(self.ret_stat());
+            if matches!(self.look_ahead(), Some(Token::Keyword(Keyword::Return))) {
+                ret_stat = Some(self.ret_stat()?);
+                
                 break;
             } else {
-                statements.push(self.statement());
+                statements.push(self.statement()?);
             }
         }
 
-        ast::Block {
+        Ok(Block {
             statements,
             ret_stat,
-        }
+        })
     }
 
-    pub fn statement(&mut self) -> Statement<'a> {
-        match self.look_ahead {
+    pub fn statement(&mut self) -> R<Statement<'a>> {
+        trace!("statement {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        match self.look_ahead() {
             Some(Token::Punct(Punct::SemiColon)) => {
                 let _ = self.next_token();
-                Statement::Empty
+                Ok(Statement::Empty)
             }
             Some(Token::Keyword(Keyword::Break)) => self.break_stmt(),
             Some(Token::Keyword(Keyword::GoTo)) => self.go_to(),
@@ -64,8 +91,8 @@ impl<'a> Parser<'a> {
             Some(Token::Keyword(Keyword::For)) => self.for_loop(),
             Some(Token::Keyword(Keyword::Function)) => self.function(false),
             Some(Token::Keyword(Keyword::Local)) => {
-                let _local = self.next_token();
-                if matches!(self.look_ahead, Some(Token::Keyword(Keyword::Function))) {
+                self.expect_keyword(Keyword::Local)?;
+                if self.at(Token::Keyword(Keyword::Function)) {
                     self.function(true)
                 } else {
                     self.assignment(true)
@@ -73,510 +100,637 @@ impl<'a> Parser<'a> {
             }
             Some(Token::Punct(Punct::DoubleColon)) => self.label(),
             Some(Token::Keyword(Keyword::Return)) => {
-                let _return = self.next_token();
-                Statement::Return(self.ret_stat())
+                Ok(Statement::Return(self.ret_stat()?))
             }
             _ => self.exp_stat(),
         }
     }
 
-    fn ret_stat(&mut self) -> RetStatement<'a> {
-        let _return = self.next_token();
-        let exps = self.exp_list();
-        RetStatement(exps)
+    fn ret_stat(&mut self) -> R<RetStatement<'a>> {
+        trace!("ret_stat {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        self.expect_keyword(Keyword::Return)?;
+        let exps = if self.eat_punct(Punct::SemiColon) || self.at_block_end() {
+            Vec::new()
+        } else { 
+            self.exp_list()?
+        };
+        self.eat_punct(Punct::SemiColon);
+        Ok(RetStatement(exps))
     }
 
-    fn exp_stat(&mut self) -> Statement<'a> {
-        let base = self.suffixed_exp();
+    fn exp_stat(&mut self) -> R<Statement<'a>> {
+        trace!("exp_stat {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        let base = self.suffixed_exp()?;
         if matches!(
-            self.look_ahead,
+            self.look_ahead(),
             Some(Token::Punct(Punct::Equal)) | Some(Token::Punct(Punct::Comma))
         ) {
             self.assign_cont(false, base)
         } else {
             // TODO Validate function call
-            Statement::Expression(base)
+            Ok(Statement::Expression(base))
         }
     }
 
-    pub fn assignment(&mut self, local: bool) -> Statement<'a> {
-        let start = self.suffixed_exp();
+    pub fn assignment(&mut self, local: bool) -> R<Statement<'a>> {
+        trace!(
+            "assignment({}) {:?}, {:?}",
+            local,
+            self.look_ahead,
+            self.look_ahead2
+        );
+        let mut start = self.suffixed_exp()?;
+        if let Expression::Name(n) = &mut start {
+            n.attr = self.eat_name_attr()?;
+        }
         self.assign_cont(local, start)
     }
 
-    pub fn assign_cont(&mut self, local: bool, start: Expression<'a>) -> Statement<'a> {
+    pub fn assign_cont(&mut self, local: bool, start: Expression<'a>) -> R<Statement<'a>> {
+        trace!(
+            "assign_cont({:?}, {:?}) {:?}, {:?}",
+            local,
+            start,
+            self.look_ahead,
+            self.look_ahead2
+        );
         let mut targets = vec![start];
         while self.eat_punct(Punct::Comma) {
-            targets.push(self.suffixed_exp())
+            let mut next = self.suffixed_exp()?;
+            if let Expression::Name(n) = &mut next {
+                n.attr = self.eat_name_attr()?;
+            }
+            targets.push(next)
         }
-        assert!(self.eat_punct(Punct::Equal));
-        let values = self.exp_list();
-        Statement::Assignment {
+        let values = if self.eat_punct(Punct::Equal) {
+            self.exp_list()?
+        } else {
+            Vec::new()
+        };
+        Ok(Statement::Assignment {
             local,
             targets,
             values,
-        }
+        })
     }
 
-    pub fn label(&mut self) -> Statement<'a> {
-        let _colons = self.next_token();
-        let name = self.name();
-        let _colons = self.next_token();
-        Statement::Label(name)
+    pub fn label(&mut self) -> R<Statement<'a>> {
+        trace!("label {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        self.expect_punct(Punct::DoubleColon)?;
+        let name = self.name()?;
+        self.expect_punct(Punct::DoubleColon)?;
+        Ok(Statement::Label(name))
     }
 
-    pub fn break_stmt(&mut self) -> Statement<'a> {
-        let _break = self.next_token();
-        ast::Statement::Break
+    pub fn break_stmt(&mut self) -> R<Statement<'a>> {
+        trace!("break_stmt {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        self.expect_keyword(Keyword::Break)?;
+        Ok(ast::Statement::Break)
     }
 
-    pub fn go_to(&mut self) -> Statement<'a> {
-        let _goto = self.next_token();
-        let name = self.name();
-        Statement::GoTo(name)
+    pub fn go_to(&mut self) -> R<Statement<'a>> {
+        trace!("go_to {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        self.expect_keyword(Keyword::GoTo)?;
+        let name = self.name()?;
+        Ok(Statement::GoTo(name))
     }
 
-    pub fn do_stmt(&mut self) -> Statement<'a> {
-        let _do = self.next_token();
-        let block = self.block();
-        let _end = self.next_token();
-        Statement::Do {
+    pub fn do_stmt(&mut self) -> R<Statement<'a>> {
+        trace!("do_stmt {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        self.expect_keyword(Keyword::Do)?;
+        let block = self.block()?;
+        self.expect_keyword(Keyword::End)?;
+        Ok(Statement::Do {
             block: Box::new(block),
-        }
+        })
     }
 
-    fn while_stmt(&mut self) -> Statement<'a> {
-        let _while = self.next_token();
-        let exp = self.exp();
-        let _do = self.next_token();
-        let block = self.block();
-        Statement::While {
+    fn while_stmt(&mut self) -> R<Statement<'a>> {
+        trace!("while_stmt {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        self.expect_keyword(Keyword::While)?;
+        let exp = self.exp()?;
+        self.expect_keyword(Keyword::Do)?;
+        let block = self.block()?;
+        self.expect_keyword(Keyword::End)?;
+        Ok(Statement::While {
             exp,
             block: Box::new(block),
-        }
+        })
     }
 
-    fn repeat(&mut self) -> Statement<'a> {
-        let _repeat = self.next_token();
-        let block = self.block();
-        let _until = self.next_token();
-        let exp = self.exp();
-        Statement::Repeat {
+    fn repeat(&mut self) -> R<Statement<'a>> {
+        trace!("repeat {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        self.expect_keyword(Keyword::Repeat)?;
+        let block = self.block()?;
+        self.expect_keyword(Keyword::Until)?;
+        let exp = self.exp()?;
+        Ok(Statement::Repeat {
             block: Box::new(block),
             exp,
-        }
+        })
     }
 
-    fn if_stmt(&mut self) -> Statement<'a> {
-        let _if = self.next_token();
-        let exp = self.exp();
-        let _then = self.next_token();
-        let block = self.block();
+    fn if_stmt(&mut self) -> R<Statement<'a>> {
+        trace!("if_stmt {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        self.expect_keyword(Keyword::If)?;
+        let exp = self.exp()?;
+        self.expect_keyword(Keyword::Then)?;
+        let block = self.block()?;
         let mut else_ifs = Vec::new();
-        while matches!(
-            self.look_ahead,
-            Some(Token::Keyword(lex_lua::Keyword::ElseIf))
-        ) {
-            else_ifs.push(self.else_if())
+        while self.at(Token::Keyword(Keyword::ElseIf)) {
+            else_ifs.push(self.else_if()?)
         }
-        let catch_all = if matches!(
-            self.look_ahead,
-            Some(Token::Keyword(lex_lua::Keyword::Else))
-        ) {
-            let _else = self.next_token();
-            let block = self.block();
+        let catch_all = if self.eat_keyword(Keyword::Else) {
+            let block = self.block()?;
             Some(Box::new(block))
         } else {
             None
         };
-        let _end = self.next_token();
-        Statement::If(If {
+        self.expect_keyword(Keyword::End)?;
+        Ok(Statement::If(If {
             test: exp,
             block: Box::new(block),
             else_ifs,
             catch_all,
-        })
+        }))
     }
 
-    fn else_if(&mut self) -> ElseIf<'a> {
-        let _elseif = self.next_token();
-        let exp = self.exp();
-        let block = self.block();
-        ElseIf { test: exp, block }
+    fn else_if(&mut self) -> R<ElseIf<'a>> {
+        trace!("else_if {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        self.expect_keyword(Keyword::ElseIf)?;
+        let exp = self.exp()?;
+        self.expect_keyword(Keyword::Then)?;
+        let block = self.block()?;
+        Ok(ElseIf { test: exp, block })
     }
 
-    fn for_loop(&mut self) -> Statement<'a> {
-        let _for = self.next_token();
-        let name = self.name();
-        if !matches!(self.look_ahead, Some(Token::Punct(Punct::Equal))) {
+    fn for_loop(&mut self) -> R<Statement<'a>> {
+        trace!("for_loop {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        self.expect_keyword(Keyword::For)?;
+        let name = self.name()?;
+        if !self.at(Token::Punct(Punct::Equal)) {
             return self.for_in_loop(name);
         }
-        let _eq = self.next_token();
-        let exp = self.exp();
-        let _comma = self.next_token();
-        let exp2 = self.exp();
-        let exp3 = if matches!(self.look_ahead, Some(Token::Punct(Punct::Comma))) {
-            let _comma = self.next_token();
-            Some(self.exp())
+        self.expect_punct(Punct::Equal)?;
+        let exp = self.exp()?;
+        self.expect_punct(Punct::Comma)?;
+        let exp2 = self.exp()?;
+        let exp3 = if self.eat_punct(Punct::Comma) {
+            Some(self.exp()?)
         } else {
             None
         };
-        let _do = self.next_token();
-        let block = self.block();
-        let _end = self.next_token();
-        Statement::For(ForLoop {
+        self.expect_keyword(Keyword::Do)?;
+        let block = self.block()?;
+        self.expect_keyword(Keyword::End)?;
+        Ok(Statement::For(ForLoop {
             init_name: name,
             init: exp,
             limit: exp2,
             step: exp3,
             block: Box::new(block),
-        })
+        }))
     }
 
-    fn for_in_loop(&mut self, first_name: Name<'a>) -> Statement<'a> {
-        let _for = self.next_token();
-        let name_list = self.name_list_cont(first_name);
-        let _in = self.next_token();
-        let exp_list = self.exp_list();
-        let _do = self.next_token();
-        let block = self.block();
-        let _end = self.next_token();
-        Statement::ForIn(ForInLoop {
+    fn for_in_loop(&mut self, first_name: Name<'a>) -> R<Statement<'a>> {
+        trace!(
+            "for_in_loop ({:?}) {:?}, {:?}",
+            first_name,
+            self.look_ahead,
+            self.look_ahead2
+        );
+        let name_list = self.name_list_cont(first_name)?;
+        self.expect_keyword(Keyword::In)?;
+        let exp_list = self.exp_list()?;
+        self.expect_keyword(Keyword::Do)?;
+        let block = self.block()?;
+        self.expect_keyword(Keyword::End)?;
+        Ok(Statement::ForIn(ForInLoop {
             name_list,
             exp_list,
             block: Box::new(block),
-        })
+        }))
     }
 
-    fn name_list_cont(&mut self, first_name: Name<'a>) -> NameList<'a> {
+    fn name_list_cont(&mut self, first_name: Name<'a>) -> R<NameList<'a>> {
+        trace!(
+            "name_list_cont({:?}) {:?}, {:?}",
+            first_name,
+            self.look_ahead,
+            self.look_ahead2
+        );
         let mut ret = Vec::new();
         ret.push(first_name);
-        while matches!(self.look_ahead, Some(Token::Punct(Punct::Comma))) {
-            let _comma = self.next_token();
-            let name = self.name();
+        while self.eat_punct(Punct::Comma) {
+            let name = self.name()?;
             ret.push(name);
         }
-        NameList(ret)
+        Ok(NameList(ret))
     }
 
-    pub fn function(&mut self, local: bool) -> Statement<'a> {
-        let _function = self.next_token();
-        let name = self.func_name();
-        let body = self.func_body();
-        Statement::Function { local, name, body }
+    fn function(&mut self, local: bool) -> R<Statement<'a>> {
+        trace!("function {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        self.expect_keyword(Keyword::Function)?;
+        let name = self.func_name()?;
+        let body = self.func_body()?;
+        Ok(Statement::Function { local, name, body })
     }
 
-    pub fn func_name(&mut self) -> FuncName<'a> {
-        let mut dot_separated = vec![self.name()];
-        while matches!(self.look_ahead, Some(Token::Punct(lex_lua::Punct::Dot))) {
-            let _dot = self.next_token();
-            let name = self.name();
+    fn func_name(&mut self) -> R<FuncName<'a>> {
+        trace!("func_name {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        let mut dot_separated = vec![self.name()?];
+        while self.eat_punct(Punct::Dot) {
+            let name = self.name()?;
             dot_separated.push(name);
         }
-        let method = if matches!(self.look_ahead, Some(Token::Punct(lex_lua::Punct::Colon))) {
-            let _colon = self.next_token();
-            Some(self.name())
+        let method = if self.eat_punct(Punct::Colon) {
+            Some(self.name()?)
         } else {
             None
         };
-        FuncName {
+        Ok(FuncName {
             dot_separated,
             method,
-        }
+        })
     }
 
-    pub fn func_body(&mut self) -> FuncBody<'a> {
-        let _paren = self.next_token();
-        let par_list = self.par_list();
-        let _paren = self.next_token();
-        let block = self.block();
-        let _end = self.next_token();
-        FuncBody { par_list, block }
+    pub fn func_body(&mut self) -> R<FuncBody<'a>> {
+        trace!("func_body {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        self.expect_punct(Punct::OpenParen)?;
+        let par_list = self.par_list()?;
+        self.expect_punct(Punct::CloseParen)?;
+        let block = self.block()?;
+        self.expect_keyword(Keyword::End)?;
+        Ok(FuncBody { par_list, block })
     }
 
-    fn func_args(&mut self) -> Args<'a> {
-        match &self.look_ahead {
+    fn func_args(&mut self) -> R<Args<'a>> {
+        trace!("func_args {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        match self.look_ahead() {
             Some(Token::Punct(Punct::OpenParen)) => {
-                let _paren = self.next_token();
-                let args = if matches!(self.look_ahead, Some(Token::Punct(Punct::CloseParen))) {
+                self.expect_punct(Punct::OpenParen)?;
+                let args = if matches!(self.look_ahead(), Some(Token::Punct(Punct::CloseParen))) {
                     Vec::new()
                 } else {
-                    self.exp_list()
+                    self.exp_list()?
                 };
-                let _paren = self.next_token();
-                Args::ExpList(args)
+                self.expect_punct(Punct::CloseParen)?;
+                Ok(Args::ExpList(args))
             }
             Some(Token::Punct(Punct::OpenBrace)) => {
-                let args = self.table_ctor();
-                Args::Table(args)
+                let args = self.table_ctor()?;
+                Ok(Args::Table(args))
             }
             Some(Token::LiteralString(s)) => {
                 let arg = LiteralString(s.clone());
                 let _s = self.next_token();
-                Args::String(arg)
+                Ok(Args::String(arg))
             }
-            _ => panic!("Invalid func args"),
+            _ => self.unexpected_token(Token::Punct(Punct::OpenParen)),
         }
     }
 
-    pub fn par_list(&mut self) -> ParList<'a> {
+    pub fn par_list(&mut self) -> R<ParList<'a>> {
+        trace!("par_list {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let mut names = Vec::new();
         let var_args = loop {
-            match &self.look_ahead {
-                Some(Token::Name(_)) => {
-                    let name = self.name();
-                    names.push(name);
-                    if !matches!(self.look_ahead, Some(Token::Punct(Punct::Comma))) {
-                        break false;
-                    }
-                    let _comma = self.next_token();
+            if self.at_name() {
+                let name = self.name()?;
+                names.push(name);
+                if !self.eat_punct(Punct::Comma) {
+                    break false;
                 }
-                Some(Token::Punct(Punct::Ellipsis)) => {
-                    let _ellipsis = self.next_token();
-                    break true;
-                }
-                _ => panic!("Invalid par list"),
+            } else if self.eat_punct(Punct::Ellipsis) {
+                break true;
+            } else {
+                break false;
             }
         };
-        ParList {
+        Ok(ParList {
             names: NameList(names),
             var_args,
+        })
+    }
+
+    pub fn name(&mut self) -> R<Name<'a>> {
+        trace!("name {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        let name = self.expect_name()?;
+        Ok(Name { name, attr: None })
+    }
+
+    pub fn eat_name_attr(&mut self) -> R<Option<Cow<'a, str>>> {
+        trace!("eat_name_attr {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        if matches!(self.look_ahead(), Some(Token::Punct(Punct::LessThan)))
+        && matches!(self.look_ahead2(), Some(Token::Name(_))) {
+            self.expect_punct(Punct::LessThan)?;
+            let name = self.expect_name()?;
+            self.expect_punct(Punct::GreaterThan)?;
+            Ok(Some(name))
+        } else {
+            Ok(None)
         }
     }
 
-    pub fn name(&mut self) -> Name<'a> {
-        let name = self.expect_name();
-        let attr = if matches!(self.look_ahead, Some(Token::Punct(Punct::LessThan))) {
-            let _angle = self.next_token();
-            let name = self.expect_name();
-            let _angle = self.next_token();
-            Some(name)
-        } else {
-            None
-        };
-        Name { name, attr }
-    }
-
-    pub fn expect_name(&mut self) -> Cow<'a, str> {
-        let name = if let Some(Token::Name(name)) = &self.look_ahead {
+    pub fn expect_name(&mut self) -> R<Cow<'a, str>> {
+        trace!("expect_name {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        let name = if let Some(Token::Name(name)) = self.look_ahead() {
             name.clone()
         } else {
-            panic!("expected name!, found {:?}", self.look_ahead);
+            return if let Some(lh) = &self.look_ahead {
+                Err(Error::UnexpectedToken(
+                    lh.span.start,
+                    format!("Expected name found {:?}", lh.token),
+                ))
+            } else {
+                Err(Error::UnexpectedEof)
+            };
         };
         let _ = self.next_token();
-        name
+        Ok(name)
     }
 
-    pub fn exp_list(&mut self) -> Vec<Expression<'a>> {
-        let first = self.exp();
+    pub fn exp_list(&mut self) -> R<Vec<Expression<'a>>> {
+        trace!("exp_list {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        let first = self.exp()?;
         let mut ret = vec![first];
-        while matches!(self.look_ahead, Some(Token::Punct(Punct::Comma))) {
-            let _comma = self.next_token();
-            ret.push(self.exp())
+        while self.eat_punct(Punct::Comma) {
+            ret.push(self.exp()?)
         }
-        ret
+        Ok(ret)
     }
 
-    fn exp(&mut self) -> Expression<'a> {
+    fn exp(&mut self) -> R<Expression<'a>> {
         self.sub_exp(0)
     }
 
-    fn sub_exp(&mut self, limit: u8) -> Expression<'a> {
+    fn sub_exp(&mut self, limit: u8) -> R<Expression<'a>> {
+        trace!(
+            "sub_exp({}) {:?}, {:?}",
+            limit,
+            self.look_ahead,
+            self.look_ahead2
+        );
         let mut base = if let Some(op) = self.try_get_unary_op() {
-            let exp = self.sub_exp(12);
+            let exp = self.sub_exp(12)?;
             Expression::UnaryOp {
                 op,
                 exp: Box::new(exp),
             }
         } else {
-            self.simple_exp()
+            self.simple_exp()?
         };
         while let Some(op) = self.try_get_binary_op(limit) {
-            let right = self.sub_exp(op.priority().1);
+            let right = self.sub_exp(op.priority().1)?;
             base = Expression::binary(base, op, right);
         }
-        base
+        Ok(base)
     }
 
-    fn simple_exp(&mut self) -> Expression<'a> {
-        match self.look_ahead.as_ref().unwrap() {
+    fn simple_exp(&mut self) -> R<Expression<'a>> {
+        trace!("simple_exp {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        match self.look_ahead().unwrap() {
             Token::Numeral(n) => {
                 let exp = Expression::Numeral(Numeral(n.clone()));
                 let _n_tok = self.next_token();
-                exp
+                Ok(exp)
             }
             Token::LiteralString(s) => {
                 let exp = Expression::LiteralString(LiteralString(s.clone()));
                 let _s_tok = self.next_token();
-                exp
+                Ok(exp)
             }
             Token::Keyword(Keyword::Nil) => {
-                self.next_token();
-                Expression::Nil
+                self.expect_keyword(Keyword::Nil)?;
+                Ok(Expression::Nil)
             }
             Token::Keyword(Keyword::True) => {
-                self.next_token();
-                Expression::True
+                self.expect_keyword(Keyword::True)?;
+                Ok(Expression::True)
             }
             Token::Keyword(Keyword::False) => {
-                self.next_token();
-                Expression::False
+                self.expect_keyword(Keyword::False)?;
+                Ok(Expression::False)
             }
             Token::Punct(Punct::Ellipsis) => {
                 //TODO: validate in fn
-                self.next_token();
-                Expression::VarArgs
+                self.expect_punct(Punct::Ellipsis)?;
+                Ok(Expression::VarArgs)
             }
             Token::Punct(Punct::OpenBrace) => {
-                let inner = self.table_ctor();
-                Expression::TableCtor(Box::new(inner))
+                let inner = self.table_ctor()?;
+                Ok(Expression::TableCtor(Box::new(inner)))
+            }
+            Token::Keyword(Keyword::Function) => {
+                self.expect_keyword(Keyword::Function)?;
+                let body = self.func_body()?;
+                Ok(Expression::FunctionDef(body))
             }
             _ => self.suffixed_exp(),
         }
     }
 
-    fn suffixed_exp(&mut self) -> Expression<'a> {
-        let expr = self.primary_exp();
-        match &self.look_ahead {
-            Some(Token::Punct(Punct::Dot)) => self.field(expr),
-            Some(Token::Punct(Punct::OpenBracket)) => self.index(expr),
-            Some(Token::Punct(Punct::Colon)) => self.func_call(expr, true),
-            Some(Token::Punct(Punct::OpenParen))
-            | Some(Token::Punct(Punct::OpenBrace))
-            | Some(Token::LiteralString(_)) => {
-                self.func_call(expr, false)
+    fn suffixed_exp(&mut self) -> R<Expression<'a>> {
+        trace!("suffixed_exp {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        let mut expr = self.primary_exp()?;
+        loop {
+            match &self.look_ahead() {
+                Some(Token::Punct(Punct::Dot)) | Some(Token::Punct(Punct::Colon)) => expr = self.field(expr)?,
+                Some(Token::Punct(Punct::OpenBracket)) => expr = self.index(expr)?,
+                Some(Token::Punct(Punct::OpenParen))
+                | Some(Token::Punct(Punct::OpenBrace))
+                | Some(Token::LiteralString(_)) => expr = self.func_call(expr, false)?,
+                _ => return Ok(expr),
             }
-            _ => expr,
         }
     }
 
-    fn field(&mut self, expr: Expression<'a>) -> Expression<'a> {
-        let colon_or_dot = self.next_token();
+    fn field(&mut self, expr: Expression<'a>) -> R<Expression<'a>> {
+        trace!("field {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        let method = self.eat_punct(Punct::Colon);
+        if !method {
+            self.expect_punct(Punct::Dot)?;
+        }
         let inner = Suffixed {
             subject: expr,
-            property: self.exp(),
+            property: self.exp()?,
             computed: false,
-            method: matches!(colon_or_dot, Some(Token::Punct(Punct::Colon))),
+            method,
         };
-        Expression::Suffixed(Box::new(inner))
+        Ok(Expression::Suffixed(Box::new(inner)))
     }
 
-    fn index(&mut self, expr: Expression<'a>) -> Expression<'a> {
-        let _bracket = self.next_token();
-        let property = self.exp();
-        let _bracket = self.next_token();
+    fn index(&mut self, expr: Expression<'a>) -> R<Expression<'a>> {
+        trace!("index {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        self.expect_punct(Punct::OpenBracket)?;
+        let property = self.exp()?;
+        self.expect_punct(Punct::CloseBracket)?;
         let inner = Suffixed {
             subject: expr,
             property,
             computed: true,
             method: false,
         };
-        Expression::Suffixed(Box::new(inner))
+        Ok(Expression::Suffixed(Box::new(inner)))
     }
 
-    fn func_call(&mut self, expr: Expression<'a>, method: bool) -> Expression<'a> {
-        let _paren = self.next_token();
-        let args = self.func_args();
-        let _paren = self.next_token();
-        
+    fn func_call(&mut self, expr: Expression<'a>, method: bool) -> R<Expression<'a>> {
+        trace!("func_call {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        let args = self.func_args()?;
+
         let call = FunctionCall {
             prefix: Box::new(PrefixExp::Exp(Box::new(expr))),
             args,
             method,
         };
         let pre = PrefixExp::FunctionCall(call);
-        Expression::Prefix(pre)
+        Ok(Expression::Prefix(pre))
     }
 
-    fn primary_exp(&mut self) -> Expression<'a> {
-        match &self.look_ahead {
+    fn primary_exp(&mut self) -> R<Expression<'a>> {
+        trace!("primary_exp {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        match &self.look_ahead() {
             Some(Token::Punct(Punct::OpenParen)) => {
-                let _paren = self.next_token();
-                let inner = self.exp();
-                Expression::Prefix(PrefixExp::Exp(Box::new(inner)))
+                self.expect_punct(Punct::OpenParen)?;
+                let inner = self.exp()?;
+                self.expect_punct(Punct::CloseParen)?;
+                Ok(Expression::Prefix(PrefixExp::Exp(Box::new(inner))))
             }
-            Some(Token::Name(n)) => {
-                let name = Name::new(n.clone());
-                let _ = self.next_token();
-                Expression::Name(name)
+            Some(Token::Name(_)) => {
+                let name = self.name()?;
+                Ok(Expression::Name(name))
             }
-            _ => panic!("Invalid primary expression {:?}", self.look_ahead),
+            _ => self.unexpected_token(Token::Punct(Punct::OpenParen))?,
         }
     }
 
-    fn table_ctor(&mut self) -> Table<'a> {
-        let _brace = self.next_token();
+    fn table_ctor(&mut self) -> R<Table<'a>> {
+        trace!("table_ctor {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        self.expect_punct(Punct::OpenBrace)?;
         let mut field_list = Vec::new();
         while !self.eat_punct(Punct::CloseBrace) {
-            field_list.push(self.field_init())
+            field_list.push(self.field_init()?)
         }
-        Table { field_list }
+        Ok(Table { field_list })
     }
 
-    fn field_init(&mut self) -> Field<'a> {
-        match &self.look_ahead {
-            Some(Token::Name(_)) => {
-                if matches!(self.look_ahead2, Some(Token::Punct(Punct::Equal))) {
-                    self.record_field()
-                } else {
-                    self.list_field()
-                }
+    fn field_init(&mut self) -> R<Field<'a>> {
+        trace!("field_init {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        let field = if self.at_name() {
+            if matches!(self.look_ahead2(), Some(Token::Punct(Punct::Equal))) {
+                self.record_field()
+            } else {
+                self.list_field()
             }
-            Some(Token::Punct(Punct::OpenBracket)) => self.record_field(),
-            _ => self.list_field(),
-        }
+        } else if self.at(Token::Punct(Punct::OpenBracket)) {
+            self.record_field()
+        } else {
+            self.list_field()
+        }?;
+        self.eat_punct(Punct::Comma);
+        self.eat_punct(Punct::SemiColon);
+        Ok(field)
     }
 
-    fn record_field(&mut self) -> Field<'a> {
-        let name = if matches!(&self.look_ahead, Some(Token::Name(_))) {
-            let name = self.name();
+    fn record_field(&mut self) -> R<Field<'a>> {
+        trace!("record_field {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        let name = if self.at_name() {
+            let name = self.name()?;
             Expression::Name(name)
         } else {
-            let _open = self.next_token();
-            let exp = self.exp();
-            let _close = self.next_token();
+            self.expect_punct(Punct::OpenBracket)?;
+            let exp = self.exp()?;
+            self.expect_punct(Punct::CloseBracket)?;
             exp
         };
-        let _eq = self.next_token();
-        Field::Record {
+        self.expect_punct(Punct::Equal)?;
+        Ok(Field::Record {
             name,
-            value: self.exp()
-        }
+            value: self.exp()?,
+        })
     }
 
-    fn list_field(&mut self) -> Field<'a> {
-        let exp = self.exp();
-        Field::List(exp)
+    fn list_field(&mut self) -> R<Field<'a>> {
+        trace!("list_field {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        let exp = self.exp()?;
+        Ok(Field::List(exp))
     }
 
     fn at_block_end(&self) -> bool {
         matches!(
-            self.look_ahead,
+            self.look_ahead(),
             None | Some(Token::Keyword(Keyword::Else))
                 | Some(Token::Keyword(Keyword::ElseIf))
                 | Some(Token::Keyword(Keyword::End))
+                | Some(Token::Keyword(Keyword::Until))
         )
     }
 
-    fn eat_punct(&mut self, _p: Punct) -> bool {
-        if matches!(&self.look_ahead, _p) {
-            self.next_token();
-            true
+    fn expect_keyword(&mut self, k: Keyword) -> R<()> {
+        if self.eat_keyword(k) {
+            Ok(())
+        } else {
+            self.unexpected_token(Token::Keyword(k))
+        }
+    }
+
+    fn eat_keyword(&mut self, k: Keyword) -> bool {
+        if let Some(Token::Keyword(lh)) = self.look_ahead() {
+            if *lh == k {
+                self.next_token();
+                return true;
+            }
+        }
+        false
+    }
+
+    fn expect_punct(&mut self, p: Punct) -> R<()> {
+        if self.eat_punct(p) {
+            Ok(())
+        } else {
+            self.unexpected_token(Token::Punct(p))
+        }
+    }
+
+    fn eat_punct(&mut self, p: Punct) -> bool {
+        if let Some(Token::Punct(lh)) = self.look_ahead() {
+            if *lh == p {
+                self.next_token();
+                return true;
+            }
+        }
+        false
+    }
+
+    fn at_name(&mut self) -> bool {
+        matches!(self.look_ahead(), Some(Token::Name(_)))
+    }
+
+    fn at(&mut self, t: Token<'a>) -> bool {
+        if let Some(lh) = self.look_ahead() {
+            match (lh, &t) {
+                (Token::Keyword(lhs), Token::Keyword(rhs)) => lhs == rhs,
+                (Token::Punct(lhs), Token::Punct(rhs)) => lhs == rhs,
+                (Token::Name(lhs), Token::Name(rhs)) => lhs == rhs,
+                (Token::Numeral(lhs), Token::Numeral(rhs)) => lhs == rhs,
+                (Token::LiteralString(lhs), Token::LiteralString(rhs)) => lhs == rhs,
+                _ => false,
+            }
         } else {
             false
         }
     }
 
-    pub fn next_token(&mut self) -> Option<Token<'a>> {
+    pub fn next_token(&mut self) -> Option<Item<'a>> {
         use std::mem::replace;
-        replace(
-            &mut self.look_ahead,
-            replace(&mut self.look_ahead2, self.lex.next()),
-        )
+        let mut next2 = self.lex.next();
+        while matches!(next2.as_ref().map(|i| &i.token), Some(Token::Comment(_))) {
+            next2 = self.lex.next();
+        }
+        replace(&mut self.look_ahead, replace(&mut self.look_ahead2, next2))
     }
 
     fn try_get_unary_op(&mut self) -> Option<UnaryOperator> {
-        let op = match self.look_ahead.as_ref()? {
+        let op = match self.look_ahead()? {
             Token::Punct(Punct::Minus) => UnaryOperator::Negate,
             Token::Keyword(Keyword::Not) => UnaryOperator::Not,
             Token::Punct(Punct::Hash) => UnaryOperator::Length,
@@ -586,8 +740,9 @@ impl<'a> Parser<'a> {
         let _op_token = self.next_token();
         Some(op)
     }
+
     fn try_get_binary_op(&mut self, limit: u8) -> Option<BinaryOperator> {
-        let op = match self.look_ahead.as_ref()? {
+        let op = match self.look_ahead()? {
             Token::Punct(Punct::Plus) => BinaryOperator::Add,
             Token::Punct(Punct::Minus) => BinaryOperator::Subtract,
             Token::Punct(Punct::Asterisk) => BinaryOperator::Multiply,
@@ -618,6 +773,25 @@ impl<'a> Parser<'a> {
             None
         }
     }
+
+    fn look_ahead(&self) -> Option<&Token<'a>> {
+        self.look_ahead.as_ref().map(|i| &i.token)
+    }
+
+    fn look_ahead2(&self) -> Option<&Token<'a>> {
+        self.look_ahead2.as_ref().map(|i| &i.token)
+    }
+
+    fn unexpected_token<T>(&self, t: Token) -> R<T> {
+        if let Some(lh) = &self.look_ahead {
+            Err(Error::UnexpectedToken(
+                lh.span.start,
+                format!("Expected {:?} found {:?}", t, lh.token),
+            ))
+        } else {
+            Err(Error::UnexpectedEof)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -628,26 +802,126 @@ mod test {
 
     #[test]
     fn print() {
+        pretty_env_logger::try_init().ok();
         let lua = "print('hello world')";
         let mut parser = Parser::new(lua.as_bytes());
-        let block = parser.block();
+        let block = parser.block().unwrap();
         let name = Expression::Name(Name::new(Cow::Borrowed("print")));
         let arg = Expression::string("'hello world'");
         let args = Args::ExpList(vec![arg]);
-        compare_blocs(block, Block {
-            statements: vec![
-                Statement::func_call(
-                    name, args
-                )
-            ],
-            ret_stat: None,
-        })
+        compare_blocs(
+            block,
+            Block {
+                statements: vec![Statement::func_call(name, args)],
+                ret_stat: None,
+            },
+        )
+    }
+    #[test]
+    fn require() {
+        pretty_env_logger::try_init().ok();
+        let lua = "require 'lib'";
+        let mut parser = Parser::new(lua.as_bytes());
+        let block = parser.block().unwrap();
+        let name = Expression::Name(Name::new(Cow::Borrowed("require")));
+        let arg = "'lib'".into();
+        let args = Args::String(arg);
+        compare_blocs(
+            block,
+            Block {
+                statements: vec![Statement::func_call(name, args)],
+                ret_stat: None,
+            },
+        )
     }
 
-    #[track_caller]
+    #[test]
+    fn callback() {
+        pretty_env_logger::try_init().ok();
+        let lua = "pcall(function () end)";
+        let mut parser = Parser::new(lua.as_bytes());
+        let block = parser.block().unwrap();
+        let name = Expression::Name(Name::new(Cow::Borrowed("pcall")));
+        let cb = Expression::FunctionDef(FuncBody {
+            block: Block::empty(),
+            par_list: ParList::empty(),
+        });
+        let args = Args::ExpList(vec![cb]);
+        compare_blocs(
+            block,
+            Block {
+                statements: vec![Statement::func_call(name, args)],
+                ret_stat: None,
+            },
+        )
+    }
+    #[test]
+    fn nested_calls() {
+        pretty_env_logger::try_init().ok();
+        let lua = "print(error())";
+        let mut parser = Parser::new(lua.as_bytes());
+        let block = parser.block().unwrap();
+        let name = Expression::Name(Name::new(Cow::Borrowed("print")));
+        let name2 = Expression::Name(Name::new(Cow::Borrowed("error")));
+        let inner_call = Expression::func_call(name2, Args::empty());
+        compare_blocs(
+            block,
+            Block {
+                statements: vec![Statement::func_call(name, Args::exp_list(vec![inner_call]))],
+                ret_stat: None,
+            },
+        )
+    }
+    
+    #[test]
+    fn chained_calls() {
+        pretty_env_logger::try_init().ok();
+        let lua = "f()()";
+        let mut parser = Parser::new(lua.as_bytes());
+        let block = parser.block().unwrap();
+        let name = Expression::Name(Name::new(Cow::Borrowed("f")));
+        let call = Expression::func_call(name, Args::empty());
+        compare_blocs(
+            block,
+            Block {
+                statements: vec![Statement::func_call(call, Args::exp_list(vec![]))],
+                ret_stat: None,
+            },
+        )
+    }
+    #[test]
+    fn if_elseif_else() {
+        pretty_env_logger::try_init().ok();
+        let lua = "if true then elseif false then else end";
+        let mut parser = Parser::new(lua.as_bytes());
+        let block = parser.block().unwrap();
+        let stmt = Statement::If(If {
+            test: Expression::True,
+            block: Box::new(Block::empty()),
+            else_ifs: vec![
+                ElseIf {
+                    test: Expression::False,
+                    block: Block::empty(),
+                }
+            ],
+            catch_all: Some(Box::new(Block::empty()))
+        });
+        compare_blocs(
+            block,
+            Block {
+                statements: vec![stmt],
+                ret_stat: None,
+            },
+        )
+    }
+
     fn compare_blocs(test: Block, target: Block) {
         for (lhs, rhs) in test.statements.iter().zip(target.statements.iter()) {
-            assert!(matches!(lhs, rhs), "Invalid statement, expected {:?}, found {:?}", rhs, lhs)
+            assert_eq!(
+                lhs, rhs,
+                "Invalid statement, expected {:?}, found {:?}",
+                rhs, lhs
+            )
         }
     }
 }

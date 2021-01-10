@@ -2,16 +2,24 @@ use std::borrow::Cow;
 
 use bstr::BStr;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Chunk<'a>(pub Block<'a>);
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Block<'a> {
     pub statements: Vec<Statement<'a>>,
     pub ret_stat: Option<RetStatement<'a>>,
 }
+impl<'a> Block<'a> {
+    pub fn empty() -> Self {
+        Self {
+            statements: Vec::new(),
+            ret_stat: None,
+        }
+    }
+}
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Statement<'a> {
     Empty,
     Expression(Expression<'a>),
@@ -48,36 +56,16 @@ pub enum Statement<'a> {
 
 impl<'a> Statement<'a> {
     pub fn func_call(subject: Expression<'a>, args: Args<'a>) -> Self {
-        Self::Expression(
-            Expression::Prefix(
-                PrefixExp::FunctionCall(
-                    FunctionCall {
-                        prefix: Box::new(PrefixExp::Exp(Box::new(subject))),
-                        args,
-                        method: false,
-                    }
-                )
-            )
-        )
+        Self::Expression(Expression::func_call(subject, args))
     }
     pub fn method_call(subject: Expression<'a>, args: Args<'a>) -> Self {
-        Self::Expression(
-            Expression::Prefix(
-                PrefixExp::FunctionCall(
-                    FunctionCall {
-                        prefix: Box::new(PrefixExp::Exp(Box::new(subject))),
-                        args,
-                        method: true,
-                    }
-                )
-            )
-        )
+        Self::Expression(Expression::method_call(subject, args))
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct VarList<'a>(Vec<Var<'a>>);
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Var<'a> {
     Name(Name<'a>),
     Index {
@@ -90,21 +78,21 @@ pub enum Var<'a> {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum PrefixExp<'a> {
     Var(Var<'a>),
     FunctionCall(FunctionCall<'a>),
     Exp(Box<Expression<'a>>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct FunctionCall<'a> {
     pub prefix: Box<PrefixExp<'a>>,
     pub args: Args<'a>,
     pub method: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Args<'a> {
     ExpList(Vec<Expression<'a>>),
     Table(Table<'a>),
@@ -115,15 +103,18 @@ impl<'a> Args<'a> {
     pub fn exp_list(exps: Vec<Expression<'a>>) -> Self {
         Self::ExpList(exps)
     }
+    pub fn empty() -> Self {
+        Self::ExpList(Vec::new())
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct FuncName<'a> {
     pub dot_separated: Vec<Name<'a>>,
     pub method: Option<Name<'a>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct If<'a> {
     pub test: Expression<'a>,
     pub block: Box<Block<'a>>,
@@ -131,13 +122,13 @@ pub struct If<'a> {
     pub catch_all: Option<Box<Block<'a>>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ElseIf<'a> {
     pub test: Expression<'a>,
     pub block: Block<'a>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ForLoop<'a> {
     pub init_name: Name<'a>,
     pub init: Expression<'a>,
@@ -146,17 +137,17 @@ pub struct ForLoop<'a> {
     pub block: Box<Block<'a>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ForInLoop<'a> {
     pub name_list: NameList<'a>,
     pub exp_list: Vec<Expression<'a>>,
     pub block: Box<Block<'a>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct RetStatement<'a>(pub Vec<Expression<'a>>);
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Expression<'a> {
     Nil,
     False,
@@ -185,6 +176,20 @@ impl<'a> Expression<'a> {
         let bs: &BStr = s.as_bytes().into();
         Self::LiteralString(LiteralString(Cow::Borrowed(bs)))
     }
+    pub fn func_call(subject: Expression<'a>, args: Args<'a>) -> Self {
+        Self::Prefix(PrefixExp::FunctionCall(FunctionCall {
+            prefix: Box::new(PrefixExp::Exp(Box::new(subject))),
+            args,
+            method: false,
+        }))
+    }
+    pub fn method_call(subject: Expression<'a>, args: Args<'a>) -> Self {
+        Self::Prefix(PrefixExp::FunctionCall(FunctionCall {
+            prefix: Box::new(PrefixExp::Exp(Box::new(subject))),
+            args,
+            method: true,
+        }))
+    }
     pub fn binary(left: Expression<'a>, op: BinaryOperator, right: Expression<'a>) -> Self {
         Self::BinOp {
             left: Box::new(left),
@@ -201,7 +206,7 @@ impl<'a> Expression<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Suffixed<'a> {
     pub subject: Expression<'a>,
     pub property: Expression<'a>,
@@ -209,32 +214,47 @@ pub struct Suffixed<'a> {
     pub method: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct NameList<'a>(pub Vec<Name<'a>>);
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ParList<'a> {
     pub names: NameList<'a>,
     pub var_args: bool,
 }
+impl<'a> ParList<'a> {
+    pub fn empty() -> Self {
+        Self {
+            names: NameList(Vec::new()),
+            var_args: false,
+        }
+    }
+}
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct LiteralString<'a>(pub Cow<'a, BStr>);
-#[derive(Debug)]
+
+impl<'a> From<&'a str> for LiteralString<'a> {
+    fn from(s: &'a str) -> Self {
+        let b: &BStr = s.as_bytes().into();
+        Self(Cow::Borrowed(b))
+    }
+}
+#[derive(Debug, PartialEq)]
 pub struct Numeral<'a>(pub Cow<'a, str>);
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct FuncBody<'a> {
     pub par_list: ParList<'a>,
     pub block: Block<'a>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Table<'a> {
     pub field_list: Vec<Field<'a>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Field<'a> {
     Record {
         name: Expression<'a>,
@@ -243,7 +263,7 @@ pub enum Field<'a> {
     List(Expression<'a>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Name<'a> {
     pub name: Cow<'a, str>,
     pub attr: Option<Cow<'a, str>>,
@@ -262,7 +282,7 @@ impl<'a> Name<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOperator {
     Add,
     Subtract,
@@ -310,7 +330,7 @@ impl BinaryOperator {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOperator {
     Negate,
     Not,
