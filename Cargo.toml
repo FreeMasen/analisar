@@ -9,3 +9,5 @@ description = "A Lua parser for Rust"
 [dependencies]
 bstr = "0.2"
 lex_lua = "0.1"
+log = "0.4"
+pretty_env_logger = "0.4"
