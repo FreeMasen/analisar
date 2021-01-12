@@ -942,6 +942,66 @@ mod test {
         })
     }
 
+    #[test]
+    fn module_return() {
+        let lua = "local a = 0
+        local b = 1
+        local c = 2
+        
+        return {
+            a = a,
+            b = b,
+            c = c,
+        }";
+        parse_and_compare(lua, Block {
+            statements: vec![
+                Statement::Assignment {
+                    local: true,
+                    targets: vec![
+                        Expression::Name(Name::new(Cow::Borrowed("a")))
+                    ],
+                    values: vec![
+                        Expression::Numeral(Numeral(Cow::Borrowed("0")))
+                    ]
+                },
+                Statement::Assignment {
+                    local: true,
+                    targets: vec![
+                        Expression::Name(Name::new(Cow::Borrowed("b")))
+                    ],
+                    values: vec![
+                        Expression::Numeral(Numeral(Cow::Borrowed("1")))
+                    ]
+                },
+                Statement::Assignment {
+                    local: true,
+                    targets: vec![
+                        Expression::Name(Name::new(Cow::Borrowed("c")))
+                    ],
+                    values: vec![
+                        Expression::Numeral(Numeral(Cow::Borrowed("2")))
+                    ]
+                },
+            ],
+            ret_stat: Some(RetStatement(vec![
+                Expression::TableCtor(Box::new(Table {
+                field_list: vec![
+                    Field::Record {
+                        name: Expression::Name(Name::new(Cow::Borrowed("a"))),
+                        value: Expression::Name(Name::new(Cow::Borrowed("a"))),
+                    },
+                    Field::Record {
+                        name: Expression::Name(Name::new(Cow::Borrowed("b"))),
+                        value: Expression::Name(Name::new(Cow::Borrowed("b"))),
+                    },
+                    Field::Record {
+                        name: Expression::Name(Name::new(Cow::Borrowed("c"))),
+                        value: Expression::Name(Name::new(Cow::Borrowed("c"))),
+                    },
+                ]
+            }))]))
+        })
+    }
 
     fn parse_and_compare(test: &str, target: Block) {
         let mut p = Parser::new(test.as_bytes());
