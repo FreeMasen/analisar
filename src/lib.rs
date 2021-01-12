@@ -915,6 +915,47 @@ mod test {
         )
     }
 
+    #[test]
+    fn local_function() {
+        let lua = "local function thing()
+            local a = 0
+            return a
+        end";
+        let mut p = Parser::new(lua.as_bytes());
+        let block = p.block().unwrap();
+        compare_blocs(block, Block {
+            statements: vec![
+                Statement::Function {
+                    local: true,
+                    body: FuncBody {
+                        par_list: ParList::empty(),
+                        block: Block {
+                            statements: vec![
+                                Statement::Assignment {
+                                    local: true,
+                                    targets: vec![
+                                        Expression::Name(Name::new(Cow::Borrowed("a")))
+                                    ],
+                                    values: vec![
+                                        Expression::Numeral(Numeral(Cow::Borrowed("0")))
+                                    ]
+                                }
+                            ],
+                            ret_stat: Some(RetStatement(vec![
+                                Expression::Name(Name::new(Cow::Borrowed("a")))
+                            ]))
+                        },
+                    },
+                    name: FuncName {
+                        dot_separated: vec![Name::new(Cow::Borrowed("thing"))],
+                        method: None,
+                    }
+                }
+            ],
+            ret_stat: None
+        })
+    }
+
     fn compare_blocs(test: Block, target: Block) {
         for (lhs, rhs) in test.statements.iter().zip(target.statements.iter()) {
             assert_eq!(
