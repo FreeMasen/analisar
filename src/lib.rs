@@ -804,13 +804,11 @@ mod test {
     fn print() {
         pretty_env_logger::try_init().ok();
         let lua = "print('hello world')";
-        let mut parser = Parser::new(lua.as_bytes());
-        let block = parser.block().unwrap();
         let name = Expression::Name(Name::new(Cow::Borrowed("print")));
         let arg = Expression::string("'hello world'");
         let args = Args::ExpList(vec![arg]);
-        compare_blocs(
-            block,
+        parse_and_compare(
+            lua,
             Block {
                 statements: vec![Statement::func_call(name, args)],
                 ret_stat: None,
@@ -821,13 +819,11 @@ mod test {
     fn require() {
         pretty_env_logger::try_init().ok();
         let lua = "require 'lib'";
-        let mut parser = Parser::new(lua.as_bytes());
-        let block = parser.block().unwrap();
         let name = Expression::Name(Name::new(Cow::Borrowed("require")));
         let arg = "'lib'".into();
         let args = Args::String(arg);
-        compare_blocs(
-            block,
+        parse_and_compare(
+            lua,
             Block {
                 statements: vec![Statement::func_call(name, args)],
                 ret_stat: None,
@@ -839,16 +835,14 @@ mod test {
     fn callback() {
         pretty_env_logger::try_init().ok();
         let lua = "pcall(function () end)";
-        let mut parser = Parser::new(lua.as_bytes());
-        let block = parser.block().unwrap();
         let name = Expression::Name(Name::new(Cow::Borrowed("pcall")));
         let cb = Expression::FunctionDef(FuncBody {
             block: Block::empty(),
             par_list: ParList::empty(),
         });
         let args = Args::ExpList(vec![cb]);
-        compare_blocs(
-            block,
+        parse_and_compare(
+            lua,
             Block {
                 statements: vec![Statement::func_call(name, args)],
                 ret_stat: None,
@@ -859,13 +853,11 @@ mod test {
     fn nested_calls() {
         pretty_env_logger::try_init().ok();
         let lua = "print(error())";
-        let mut parser = Parser::new(lua.as_bytes());
-        let block = parser.block().unwrap();
         let name = Expression::Name(Name::new(Cow::Borrowed("print")));
         let name2 = Expression::Name(Name::new(Cow::Borrowed("error")));
         let inner_call = Expression::func_call(name2, Args::empty());
-        compare_blocs(
-            block,
+        parse_and_compare(
+            lua,
             Block {
                 statements: vec![Statement::func_call(name, Args::exp_list(vec![inner_call]))],
                 ret_stat: None,
@@ -877,12 +869,10 @@ mod test {
     fn chained_calls() {
         pretty_env_logger::try_init().ok();
         let lua = "f()()";
-        let mut parser = Parser::new(lua.as_bytes());
-        let block = parser.block().unwrap();
         let name = Expression::Name(Name::new(Cow::Borrowed("f")));
         let call = Expression::func_call(name, Args::empty());
-        compare_blocs(
-            block,
+        parse_and_compare(
+            lua,
             Block {
                 statements: vec![Statement::func_call(call, Args::exp_list(vec![]))],
                 ret_stat: None,
@@ -893,8 +883,6 @@ mod test {
     fn if_elseif_else() {
         pretty_env_logger::try_init().ok();
         let lua = "if true then elseif false then else end";
-        let mut parser = Parser::new(lua.as_bytes());
-        let block = parser.block().unwrap();
         let stmt = Statement::If(If {
             test: Expression::True,
             block: Box::new(Block::empty()),
@@ -906,8 +894,8 @@ mod test {
             ],
             catch_all: Some(Box::new(Block::empty()))
         });
-        compare_blocs(
-            block,
+        parse_and_compare(
+            lua,
             Block {
                 statements: vec![stmt],
                 ret_stat: None,
@@ -921,9 +909,7 @@ mod test {
             local a = 0
             return a
         end";
-        let mut p = Parser::new(lua.as_bytes());
-        let block = p.block().unwrap();
-        compare_blocs(block, Block {
+        parse_and_compare(lua, Block {
             statements: vec![
                 Statement::Function {
                     local: true,
@@ -954,6 +940,13 @@ mod test {
             ],
             ret_stat: None
         })
+    }
+
+
+    fn parse_and_compare(test: &str, target: Block) {
+        let mut p = Parser::new(test.as_bytes());
+        let block = p.block().unwrap();
+        compare_blocs(block, target);
     }
 
     fn compare_blocs(test: Block, target: Block) {
