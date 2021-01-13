@@ -1001,6 +1001,57 @@ mod test {
             }))]))
         });
     }
+    #[test]
+    fn assignments() {
+        let lua = "local a = {}
+        a.b = 1
+        a['c'] = 2
+        ";
+        parse_and_compare(lua, Block {
+            statements: vec![
+                Statement::Assignment {
+                    local: true,
+                    targets: vec![
+                        Expression::Name(Name::new(Cow::Borrowed("a")))
+                    ],
+                    values: vec![
+                        Expression::TableCtor(Box::new(Table {
+                            field_list: vec![],
+                        }))
+                    ]
+                },
+                Statement::Assignment {
+                    local: false,
+                    targets: vec![
+                        Expression::Suffixed(Box::new(Suffixed {
+                            subject: Expression::Name(Name::new(Cow::Borrowed("a"))),
+                            property: Expression::Name(Name::new(Cow::Borrowed("b"))),
+                            computed: false,
+                            method: false,
+                        }))
+                    ],
+                    values: vec![
+                        Expression::Numeral(Numeral(Cow::Borrowed("1")))
+                    ]
+                },
+                Statement::Assignment {
+                    local: false,
+                    targets: vec![
+                        Expression::Suffixed(Box::new(Suffixed {
+                            subject: Expression::Name(Name::new(Cow::Borrowed("a"))),
+                            property: Expression::string("'c'"),
+                            computed: true,
+                            method: false,
+                        }))
+                    ],
+                    values: vec![
+                        Expression::Numeral(Numeral(Cow::Borrowed("2")))
+                    ]
+                },
+            ],
+            ret_stat: None,
+        });
+    }
 
     #[test]
     fn table_ctor_and_access() {
