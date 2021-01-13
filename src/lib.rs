@@ -1230,12 +1230,84 @@ mod test {
         });
     }
 
+    #[test]
+    fn ifs() {
+        let lua = "
+        if false then
+            print('never')
+        elseif false then
+            print('never again')
+        else
+            print('always')
+        end
+        ";
+        parse_and_compare(lua, Block {
+            statements: vec![
+                Statement::If(
+                    If {
+                        test: Expression::False,
+                        block: Box::new(Block {
+                            statements: vec![
+                                Statement::Expression(Expression::Prefix(
+                                    PrefixExp::FunctionCall(FunctionCall {
+                                        prefix: Box::new(PrefixExp::Exp(Box::new(Expression::Name(Name::new(Cow::Borrowed("print")))))),
+                                        method: false,
+                                        args: Args::ExpList(vec![
+                                            Expression::string("'never'")
+                                        ])
+                                    })
+                                ))
+                            ],
+                            ret_stat: None,
+                        }),
+                        else_ifs: vec![
+                            ElseIf {
+                                test: Expression::False,
+                                block: Block {
+                                    statements: vec![
+                                        Statement::Expression(Expression::Prefix(
+                                            PrefixExp::FunctionCall(FunctionCall {
+                                                prefix: Box::new(PrefixExp::Exp(Box::new(Expression::Name(Name::new(Cow::Borrowed("print")))))),
+                                                method: false,
+                                                args: Args::ExpList(vec![
+                                                    Expression::string("'never again'")
+                                                ])
+                                            })
+                                        ))
+                                    ],
+                                    ret_stat: None,
+                                }
+                            }
+                        ],
+                        catch_all: Some(Box::new(Block {
+                            statements: vec![
+                                Statement::Expression(Expression::Prefix(
+                                    PrefixExp::FunctionCall(FunctionCall {
+                                        prefix: Box::new(PrefixExp::Exp(Box::new(Expression::Name(Name::new(Cow::Borrowed("print")))))),
+                                        method: false,
+                                        args: Args::ExpList(vec![
+                                            Expression::string("'always'")
+                                        ])
+                                    })
+                                ))
+                            ],
+                            ret_stat: None,
+                        }))
+                    }
+                )
+            ],
+            ret_stat: None,
+        });
+    }
+
+    #[track_caller]
     fn parse_and_compare(test: &str, target: Block) {
         let mut p = Parser::new(test.as_bytes());
         let block = p.block().unwrap();
         compare_blocs(block, target);
     }
 
+    #[track_caller]
     fn compare_blocs(test: Block, target: Block) {
         for (lhs, rhs) in test.statements.iter().zip(target.statements.iter()) {
             assert_eq!(
