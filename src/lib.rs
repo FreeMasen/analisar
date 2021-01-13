@@ -1094,6 +1094,32 @@ mod test {
         });
     }
 
+    #[test]
+    fn for_and_break() {
+        let lua = "
+        for i = 0, 10, 1 do
+            break
+        end
+        ";
+        parse_and_compare(lua, Block {
+            statements: vec![
+                Statement::For(ForLoop {
+                    init_name: Name::new(Cow::Borrowed("i")),
+                    init: Expression::Numeral(Numeral(Cow::Borrowed("0"))),
+                    limit: Expression::Numeral(Numeral(Cow::Borrowed("10"))),
+                    step: Some(Expression::Numeral(Numeral(Cow::Borrowed("1")))),
+                    block: Box::new(Block {
+                        statements: vec![
+                            Statement::Break,
+                        ],
+                        ret_stat: None,                        
+                    })
+                })
+            ],
+            ret_stat: None,
+        });
+    }
+
     fn parse_and_compare(test: &str, target: Block) {
         let mut p = Parser::new(test.as_bytes());
         let block = p.block().unwrap();
