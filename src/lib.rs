@@ -1120,6 +1120,54 @@ mod test {
         });
     }
 
+    #[test]
+    fn for_in() {
+        let lua = "
+        for i, v in ipairs({1,2,3}) do
+            print(i)
+        end
+        ";
+        parse_and_compare(lua, Block {
+            statements: vec![
+                Statement::ForIn(ForInLoop {
+                    name_list: NameList(vec![Name::new(Cow::Borrowed("i")),Name::new(Cow::Borrowed("v"))]),
+                    exp_list: vec![
+                        Expression::Prefix(PrefixExp::FunctionCall(FunctionCall {
+                            prefix: Box::new(PrefixExp::Exp(Box::new(Expression::Name(Name::new(Cow::Borrowed("ipairs")))))),
+                            args: Args::ExpList(vec![
+                                Expression::TableCtor(Box::new(
+                                    Table {
+                                        field_list: vec![
+                                            Field::List(Expression::Numeral(Numeral(Cow::Borrowed("1")))),
+                                            Field::List(Expression::Numeral(Numeral(Cow::Borrowed("2")))),
+                                            Field::List(Expression::Numeral(Numeral(Cow::Borrowed("3")))),
+                                        ]
+                                    }
+                                ))
+                            ]),
+                            method: false,
+                        }))
+                    ],
+                    block: Box::new(Block {
+                        statements: vec![
+                            Statement::Expression(Expression::Prefix(
+                                PrefixExp::FunctionCall(FunctionCall {
+                                    prefix: Box::new(PrefixExp::Exp(Box::new(Expression::Name(Name::new(Cow::Borrowed("print")))))),
+                                    method: false,
+                                    args: Args::ExpList(vec![
+                                        Expression::Name(Name::new(Cow::Borrowed("i")))
+                                    ])
+                                })
+                            )),
+                        ],
+                        ret_stat: None,                        
+                    })
+                })
+            ],
+            ret_stat: None,
+        });
+    }
+
     fn parse_and_compare(test: &str, target: Block) {
         let mut p = Parser::new(test.as_bytes());
         let block = p.block().unwrap();
