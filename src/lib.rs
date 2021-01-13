@@ -797,7 +797,6 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod test {
     use ast::Block;
-
     use super::*;
 
     #[test]
@@ -813,7 +812,7 @@ mod test {
                 statements: vec![Statement::func_call(name, args)],
                 ret_stat: None,
             },
-        )
+        );
     }
     #[test]
     fn require() {
@@ -828,7 +827,7 @@ mod test {
                 statements: vec![Statement::func_call(name, args)],
                 ret_stat: None,
             },
-        )
+        );
     }
 
     #[test]
@@ -847,7 +846,7 @@ mod test {
                 statements: vec![Statement::func_call(name, args)],
                 ret_stat: None,
             },
-        )
+        );
     }
     #[test]
     fn nested_calls() {
@@ -862,7 +861,7 @@ mod test {
                 statements: vec![Statement::func_call(name, Args::exp_list(vec![inner_call]))],
                 ret_stat: None,
             },
-        )
+        );
     }
     
     #[test]
@@ -877,7 +876,7 @@ mod test {
                 statements: vec![Statement::func_call(call, Args::exp_list(vec![]))],
                 ret_stat: None,
             },
-        )
+        );
     }
     #[test]
     fn if_elseif_else() {
@@ -900,7 +899,7 @@ mod test {
                 statements: vec![stmt],
                 ret_stat: None,
             },
-        )
+        );
     }
 
     #[test]
@@ -939,7 +938,7 @@ mod test {
                 }
             ],
             ret_stat: None
-        })
+        });
     }
 
     #[test]
@@ -1000,7 +999,7 @@ mod test {
                     },
                 ]
             }))]))
-        })
+        });
     }
 
     #[test]
@@ -1064,6 +1063,32 @@ mod test {
 
                     })
                 )),
+            ],
+            ret_stat: None
+        });
+    }
+
+    #[test]
+    fn label_and_goto() {
+        let lua = "
+        ::top::
+        print('loop')
+        goto top
+        ";
+
+        parse_and_compare(lua, Block {
+            statements: vec![
+                Statement::Label(Name::new(Cow::Borrowed("top"))),
+                Statement::Expression(Expression::Prefix(
+                    PrefixExp::FunctionCall(FunctionCall {
+                        prefix: Box::new(PrefixExp::Exp(Box::new(Expression::Name(Name::new(Cow::Borrowed("print")))))),
+                        method: false,
+                        args: Args::ExpList(vec![
+                            Expression::string("'loop'")
+                        ])
+                    })
+                )),
+                Statement::GoTo(Name::new(Cow::Borrowed("top"))),
             ],
             ret_stat: None
         });
