@@ -1168,6 +1168,37 @@ mod test {
         });
     }
 
+    #[test]
+    fn while_loop() {
+        let lua = "
+        while true do
+            print('loop')
+        end
+        ";
+        parse_and_compare(lua, Block {
+            statements: vec![
+                Statement::While {
+                    exp: Expression::True,
+                    block: Box::new(Block {
+                        statements: vec![
+                            Statement::Expression(Expression::Prefix(
+                                PrefixExp::FunctionCall(FunctionCall {
+                                    prefix: Box::new(PrefixExp::Exp(Box::new(Expression::Name(Name::new(Cow::Borrowed("print")))))),
+                                    method: false,
+                                    args: Args::ExpList(vec![
+                                        Expression::string("'loop'")
+                                    ])
+                                })
+                            )),
+                        ],
+                        ret_stat: None,
+                    })
+                }
+            ],
+            ret_stat: None,
+        });
+    }
+
     fn parse_and_compare(test: &str, target: Block) {
         let mut p = Parser::new(test.as_bytes());
         let block = p.block().unwrap();
