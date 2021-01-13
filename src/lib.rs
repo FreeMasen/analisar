@@ -1003,6 +1003,72 @@ mod test {
         })
     }
 
+    #[test]
+    fn table_ctor_and_access() {
+        let lua = "a = {
+            one = 'one',
+            two = 'two',
+        }
+        print(a.one)
+        print(a.two)
+        ";
+        parse_and_compare(lua, Block {
+            statements: vec![
+                Statement::Assignment {
+                    local: false,
+                    targets: vec![
+                        Expression::Name(Name::new(Cow::Borrowed("a")))
+                    ],
+                    values: vec![
+                        Expression::TableCtor(Box::new(Table {
+                            field_list: vec![
+                                Field::Record {
+                                    name: Expression::Name(Name::new(Cow::Borrowed("one"))),
+                                    value: Expression::LiteralString(LiteralString(Cow::Borrowed("'one'".as_bytes().into()))),
+                                },
+                                Field::Record {
+                                    name: Expression::Name(Name::new(Cow::Borrowed("two"))),
+                                    value: Expression::LiteralString(LiteralString(Cow::Borrowed("'two'".as_bytes().into()))),
+                                }
+                            ]
+                        }))
+                    ]
+                },
+                Statement::Expression(Expression::Prefix(
+                    PrefixExp::FunctionCall(FunctionCall {
+                        prefix: Box::new(PrefixExp::Exp(Box::new(Expression::Name(Name::new(Cow::Borrowed("print")))))),
+                        method: false,
+                        args: Args::ExpList(vec![
+                            Expression::Suffixed(Box::new(Suffixed {
+                                method: false,
+                                computed: false,
+                                subject: Expression::Name(Name::new(Cow::Borrowed("a"))),
+                                property: Expression::Name(Name::new(Cow::Borrowed("one")))
+                            }))
+                        ])
+
+                    })
+                )),
+                Statement::Expression(Expression::Prefix(
+                    PrefixExp::FunctionCall(FunctionCall {
+                        prefix: Box::new(PrefixExp::Exp(Box::new(Expression::Name(Name::new(Cow::Borrowed("print")))))),
+                        method: false,
+                        args: Args::ExpList(vec![
+                            Expression::Suffixed(Box::new(Suffixed {
+                                method: false,
+                                computed: false,
+                                subject: Expression::Name(Name::new(Cow::Borrowed("a"))),
+                                property: Expression::Name(Name::new(Cow::Borrowed("two")))
+                            }))
+                        ])
+
+                    })
+                )),
+            ],
+            ret_stat: None
+        });
+    }
+
     fn parse_and_compare(test: &str, target: Block) {
         let mut p = Parser::new(test.as_bytes());
         let block = p.block().unwrap();
