@@ -39,7 +39,7 @@ fn try_all() {
                 match chunk {
                     Ok(c) => {
                         info!("{:?}", c)
-                    },
+                    }
                     Err(Error::UnexpectedToken(offset, msg)) => {
                         if let Some(line) = analisar::error::find_line(&text, offset) {
                             let path = format!(

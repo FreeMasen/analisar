@@ -6,16 +6,10 @@ use bstr::BStr;
 pub struct Chunk<'a>(pub Block<'a>);
 
 #[derive(Debug, PartialEq)]
-pub struct Block<'a> {
-    pub statements: Vec<Statement<'a>>,
-    pub ret_stat: Option<RetStatement<'a>>,
-}
+pub struct Block<'a>(pub Vec<Statement<'a>>);
 impl<'a> Block<'a> {
     pub fn empty() -> Self {
-        Self {
-            statements: Vec::new(),
-            ret_stat: None,
-        }
+        Self(Vec::new())
     }
 }
 

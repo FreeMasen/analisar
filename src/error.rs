@@ -27,7 +27,12 @@ pub struct LineInfo {
 
 pub fn find_line(orig: &[u8], offset: usize) -> Option<LineInfo> {
     let pre = orig.get(..offset)?;
-    let to_prev_nl = pre.iter().rev().enumerate().find_map(find_nl).unwrap_or(pre.len());
+    let to_prev_nl = pre
+        .iter()
+        .rev()
+        .enumerate()
+        .find_map(find_nl)
+        .unwrap_or(pre.len());
     let start = pre.len().saturating_sub(to_prev_nl);
     let post = orig.get(offset..)?;
     let to_next_nl = post
@@ -35,7 +40,7 @@ pub fn find_line(orig: &[u8], offset: usize) -> Option<LineInfo> {
         .enumerate()
         .find_map(find_nl)
         .unwrap_or(post.len());
-    let length = orig[start..offset+to_next_nl].len();
+    let length = orig[start..offset + to_next_nl].len();
     let number = pre.split(is_nl).count();
     Some(LineInfo {
         start,
@@ -71,13 +76,11 @@ mod test {
     fn find_lines() {
         let byte_offset_targets = &[
             ("This only has 1 line", 7, "This only has 1 line"),
-            ("this has\na few lines\nin it",  12, "a few lines")
+            ("this has\na few lines\nin it", 12, "a few lines"),
         ];
         for &(bytes, offset, target) in byte_offset_targets {
             let info = find_line(bytes.as_bytes(), offset).unwrap();
-            assert_eq!(&bytes[info.start..info.start+info.length], target);
-
+            assert_eq!(&bytes[info.start..info.start + info.length], target);
         }
-
     }
 }
