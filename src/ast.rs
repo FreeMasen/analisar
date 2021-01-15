@@ -44,7 +44,6 @@ pub enum Statement<'a> {
         name: FuncName<'a>,
         body: FuncBody<'a>,
     },
-    AttrNameList {},
     Return(RetStatement<'a>),
 }
 
