@@ -1494,6 +1494,17 @@ mod test {
             ])),
         });
     }
+
+    #[test]
+    fn empty() {
+        let lua = ";";
+        parse_and_compare(lua, Block {
+            statements: vec![
+                Statement::Empty,
+            ],
+            ret_stat: None,
+        })
+    }
     
     #[track_caller]
     fn parse_and_compare(test: &str, target: Block) {
