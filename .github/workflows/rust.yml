@@ -22,7 +22,6 @@ jobs:
       run: git clone https://github.com/lua/lua
     - name: Run cargo-tarpaulin
       uses: actions-rs/tarpaulin@v0.1
-
     - name: Upload to codecov.io
       uses: codecov/codecov-action@v1.0.2
       with:

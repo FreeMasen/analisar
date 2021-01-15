@@ -204,6 +204,12 @@ impl<'a> Expression<'a> {
             exp: Box::new(exp),
         }
     }
+    pub fn name_from(s: &'a str) -> Self {
+        Self::Name(Name::new(Cow::Borrowed(s)))
+    }
+    pub fn numeral_from(s: &'a str) -> Self {
+        Self::Numeral(Numeral(Cow::Borrowed(s)))
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -279,6 +285,12 @@ impl<'a> Name<'a> {
             name,
             attr: Some(attr),
         }
+    }
+}
+
+impl<'a> From<&'a str> for Name<'a> {
+    fn from(s: &'a str) -> Self {
+        Self::new(Cow::Borrowed(s))
     }
 }
 
