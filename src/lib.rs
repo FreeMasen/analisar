@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use ast::{
-    Args, BinaryOperator, Block, Chunk, ElseIf, Expression, Field, ForInLoop, ForLoop, FuncBody,
+    Args, BinaryOperator, Block, ElseIf, Expression, Field, ForInLoop, ForLoop, FuncBody,
     FuncName, FunctionCall, If, LiteralString, Name, NameList, Numeral, ParList,
     RetStatement, Statement, Suffixed, Table, UnaryOperator,
 };
@@ -44,16 +44,13 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn next(&mut self) -> Option<R<Chunk<'a>>> {
+    pub fn next(&mut self) -> Option<R<Block<'a>>> {
         if self.look_ahead.is_none() {
             return None;
         }
-        Some(self.chunk())
+        Some(self.block())
     }
 
-    pub fn chunk(&mut self) -> R<Chunk<'a>> {
-        Ok(Chunk(self.block()?))
-    }
 
     pub fn block(&mut self) -> R<Block<'a>> {
         trace!("block {:?}, {:?}", self.look_ahead, self.look_ahead2);

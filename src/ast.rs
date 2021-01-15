@@ -1,9 +1,5 @@
 use std::borrow::Cow;
-
 use bstr::BStr;
-
-#[derive(Debug, PartialEq)]
-pub struct Chunk<'a>(pub Block<'a>);
 
 #[derive(Debug, PartialEq)]
 pub struct Block<'a>(pub Vec<Statement<'a>>);
