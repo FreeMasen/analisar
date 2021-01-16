@@ -18,6 +18,8 @@ pub struct Parser<'a> {
     lex: SpannedLexer<'a>,
     look_ahead: Option<Item<'a>>,
     look_ahead2: Option<Item<'a>>,
+    token_buffer: Vec<Item<'a>>,
+    capture_tokens: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -41,6 +43,36 @@ impl<'a> Parser<'a> {
             lex,
             look_ahead,
             look_ahead2,
+            token_buffer: Vec::new(),
+            capture_tokens: false,
+        }
+    }
+
+    fn new_with_token_buffer(bytes: &'a [u8]) -> Self {
+        let mut lex = SpannedLexer::new(bytes);
+        let mut look_ahead = None;
+        let mut look_ahead2 = None;
+        let mut token_buffer = Vec::new();
+        while let Some(i) = lex.next() {
+            token_buffer.push(i.clone());
+            if !matches!(i.token, Token::Comment(_)) {
+                look_ahead = Some(i);
+                break;
+            }
+        }
+        while let Some(i) = lex.next() {
+            token_buffer.push(i.clone());
+            if !matches!(i.token, Token::Comment(_)) {
+                look_ahead2 = Some(i);
+                break;
+            }
+        }
+        Self {
+            lex,
+            look_ahead,
+            look_ahead2,
+            token_buffer,
+            capture_tokens: true,
         }
     }
 
@@ -714,8 +746,18 @@ impl<'a> Parser<'a> {
     pub fn next_token(&mut self) -> Option<Item<'a>> {
         use std::mem::replace;
         let mut next2 = self.lex.next();
+        if self.capture_tokens {
+            if let Some(item) = next2.as_ref() {
+                self.token_buffer.push(item.clone());
+            }
+        }
         while matches!(next2.as_ref().map(|i| &i.token), Some(Token::Comment(_))) {
             next2 = self.lex.next();
+            if self.capture_tokens {
+                if let Some(item) = next2.as_ref() {
+                    self.token_buffer.push(item.clone());
+                }
+            }
         }
         replace(&mut self.look_ahead, replace(&mut self.look_ahead2, next2))
     }
@@ -781,6 +823,34 @@ impl<'a> Parser<'a> {
             ))
         } else {
             Err(Error::UnexpectedEof)
+        }
+    }
+}
+
+pub struct TokenBufferParser<'a> {
+    inner: Parser<'a>
+}
+
+impl<'a> TokenBufferParser<'a> {
+
+    pub fn new(b: &'a [u8]) -> Self {
+        let inner = Parser::new_with_token_buffer(b);
+        Self {
+            inner,
+        }
+    }
+
+    pub fn next(&mut self) -> Option<R<(Vec<Item<'a>>, Block<'a>)>> {
+        let inner_next = self.inner.next()?;
+        match inner_next {
+            Ok(next) => {
+                let mut tokens = Vec::with_capacity(self.inner.token_buffer.len());
+                std::mem::swap(&mut self.inner.token_buffer, &mut tokens);
+                Some(Ok((tokens, next)))
+            },
+            Err(e) => {
+                Some(Err(e))
+            },
         }
     }
 }
