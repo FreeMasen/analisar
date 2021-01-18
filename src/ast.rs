@@ -1,5 +1,5 @@
-use std::borrow::Cow;
 use bstr::BStr;
+use std::borrow::Cow;
 
 #[derive(Debug, PartialEq)]
 pub struct Block<'a>(pub Vec<Statement<'a>>);
@@ -144,13 +144,11 @@ impl<'a> Expression<'a> {
         Self::LiteralString(LiteralString(Cow::Borrowed(bs)))
     }
     pub fn func_call(subject: Expression<'a>, args: Args<'a>) -> Self {
-        Self::FuncCall(
-            FunctionCall {
-                prefix: Box::new(subject),
-                args,
-                method: false,
-            }
-        )
+        Self::FuncCall(FunctionCall {
+            prefix: Box::new(subject),
+            args,
+            method: false,
+        })
     }
     pub fn method_call(subject: Expression<'a>, args: Args<'a>) -> Self {
         Self::FuncCall(FunctionCall {
