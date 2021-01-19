@@ -1,10 +1,14 @@
-use std::borrow::Cow;
+/// This module provides and ast and parser for a more context aware
+// parsing scenarios. Primarily this means additional token information
+// like the spans that represent a keyword or operator along with any
+// comments being attached to a [`crate::aware::ast::Statement`]
+use std::{borrow::Cow, collections::VecDeque};
 
 use ast::{
-    Args, Attr, BinaryOperator, Block, ElseIf, ExpListItem, Expression, Field, FieldSep, ForInLoop,
-    ForLoop, FuncBody, FuncName, FuncNamePart, FunctionCall, If, LiteralString, Name, NameListPart,
-    Numeral, ParList, ParListPart, RetStatement, Statement, SuffixSep, Suffixed, SuffixedProperty,
-    Table, UnaryOperator,
+    Args, Attr, BinaryOperator, Block, BlockWithComments, ElseIf, ExpListItem, Expression, Field,
+    FieldSep, ForInLoop, ForLoop, FuncBody, FuncName, FuncNamePart, FunctionCall, If,
+    LiteralString, Name, NameListPart, Numeral, ParList, ParListPart, RetStatement, Statement,
+    StatementWithComments, SuffixSep, Suffixed, SuffixedProperty, Table, UnaryOperator,
 };
 
 use lex_lua::{Item, Keyword, Punct, Span, SpannedLexer, Token};
@@ -14,11 +18,13 @@ mod ast;
 use crate::error::Error;
 use crate::R;
 
+/// A parser that will provide a context-ful ast
 pub struct Parser<'a> {
     lex: SpannedLexer<'a>,
     look_ahead: Option<Item<'a>>,
     look_ahead2: Option<Item<'a>>,
-    comment_buffer: Vec<Item<'a>>,
+    comment_buffer: VecDeque<Item<'a>>,
+    bytes: &'a [u8],
 }
 
 impl<'a> Parser<'a> {
@@ -26,18 +32,18 @@ impl<'a> Parser<'a> {
         let mut lex = SpannedLexer::new(bytes);
         let mut look_ahead = None;
         let mut look_ahead2 = None;
-        let mut comment_buffer = Vec::new();
+        let mut comment_buffer = VecDeque::new();
         while let Some(i) = lex.next() {
-            if let Token::Comment(c) = &i.token {
-                comment_buffer.push(i);
+            if let Token::Comment(_) = &i.token {
+                comment_buffer.push_back(i);
             } else {
                 look_ahead = Some(i);
                 break;
             }
         }
         while let Some(i) = lex.next() {
-            if let Token::Comment(c) = &i.token {
-                comment_buffer.push(i);
+            if let Token::Comment(_) = &i.token {
+                comment_buffer.push_back(i);
             } else {
                 look_ahead2 = Some(i);
                 break;
@@ -48,18 +54,74 @@ impl<'a> Parser<'a> {
             look_ahead,
             look_ahead2,
             comment_buffer,
+            bytes,
         }
     }
 
-    pub fn next(&mut self) -> Option<R<Block<'a>>> {
+    /// Get the next logical section of any lua code as a [`StatementWithComments`]
+    pub fn next(&mut self) -> Option<R<StatementWithComments<'a>>> {
         if self.look_ahead.is_none() {
             None
         } else {
-            Some(self.block())
+            let ret = match self.statement() {
+                Ok(statement) => {
+                    // if we are at the last block, all comments should be considered
+                    // part of this block.
+                    let comments = if self.look_ahead.is_none() {
+                        std::mem::replace(&mut self.comment_buffer, VecDeque::new()).into()
+                    } else {
+                        let end = if let Some(end) = statement.end() {
+                            end
+                        } else {
+                            self.look_ahead
+                                .as_ref()
+                                .map(|i| i.span.end)
+                                .unwrap_or(self.bytes.len())
+                        };
+                        let mut ret = Vec::new();
+                        while let Some(item) = self.comment_buffer.front() {
+                            if item.span.start < end {
+                                ret.push(self.comment_buffer.pop_front().unwrap());
+                            } else {
+                                // If there is no new line character between the end of our statement and the start
+                                // of the next comment in the buffer, we want to include it with this block. A new
+                                // line character would push the next comment into the next block.
+                                if let Some(bytes) = self.bytes.get(end..item.span.start) {
+                                    if !bytes.iter().any(|&b| b == b'\n' || b == b'\r' || b == 0xff)
+                                    {
+                                        ret.push(self.comment_buffer.pop_front().unwrap());
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        ret
+                    };
+                    Ok(StatementWithComments {
+                        statement,
+                        comments,
+                    })
+                }
+                Err(e) => Err(e),
+            };
+            Some(ret)
         }
     }
 
-    pub fn block(&mut self) -> R<Block<'a>> {
+    /// This method will return a full list of the next [`ast::StatementWithComments`]s
+    /// if parsing a file, this will parse all the way until the end of the file.
+    pub fn block(&mut self) -> R<BlockWithComments<'a>> {
+        let mut statements = Vec::new();
+        while let Some(stmt) = self.next() {
+            match stmt {
+                Ok(stmt) => statements.push(stmt),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(BlockWithComments(statements))
+    }
+
+    fn block_(&mut self) -> R<Block<'a>> {
         trace!("block {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let mut statements = Vec::new();
         while !self.at_block_end() {
@@ -69,7 +131,7 @@ impl<'a> Parser<'a> {
         Ok(Block(statements))
     }
 
-    pub fn statement(&mut self) -> R<Statement<'a>> {
+    fn statement(&mut self) -> R<Statement<'a>> {
         trace!("statement {:?}, {:?}", self.look_ahead, self.look_ahead2);
         match self.look_ahead() {
             Some(Token::Punct(Punct::SemiColon)) => {
@@ -124,7 +186,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn assignment(&mut self, local_span: Option<Span>) -> R<Statement<'a>> {
+    fn assignment(&mut self, local_span: Option<Span>) -> R<Statement<'a>> {
         trace!(
             "assignment({}) {:?}, {:?}",
             local_span.is_some(),
@@ -138,11 +200,7 @@ impl<'a> Parser<'a> {
         self.assign_cont(local_span, start)
     }
 
-    pub fn assign_cont(
-        &mut self,
-        local_span: Option<Span>,
-        start: Expression<'a>,
-    ) -> R<Statement<'a>> {
+    fn assign_cont(&mut self, local_span: Option<Span>, start: Expression<'a>) -> R<Statement<'a>> {
         trace!(
             "assign_cont({:?}, {:?}) {:?}, {:?}",
             local_span.is_some(),
@@ -173,7 +231,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub fn label(&mut self) -> R<Statement<'a>> {
+    fn label(&mut self) -> R<Statement<'a>> {
         trace!("label {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let colons1_span = self.expect_punct(Punct::DoubleColon)?;
         let name = self.name()?;
@@ -185,23 +243,23 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub fn break_stmt(&mut self) -> R<Statement<'a>> {
+    fn break_stmt(&mut self) -> R<Statement<'a>> {
         trace!("break_stmt {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let span = self.expect_keyword(Keyword::Break)?;
         Ok(ast::Statement::Break(span))
     }
 
-    pub fn go_to(&mut self) -> R<Statement<'a>> {
+    fn go_to(&mut self) -> R<Statement<'a>> {
         trace!("go_to {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let goto_span = self.expect_keyword(Keyword::GoTo)?;
         let label = self.name()?;
         Ok(Statement::GoTo { goto_span, label })
     }
 
-    pub fn do_stmt(&mut self) -> R<Statement<'a>> {
+    fn do_stmt(&mut self) -> R<Statement<'a>> {
         trace!("do_stmt {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let do_span = self.expect_keyword(Keyword::Do)?;
-        let block = self.block()?;
+        let block = self.block_()?;
         let end_span = self.expect_keyword(Keyword::End)?;
         Ok(Statement::Do {
             do_span,
@@ -215,7 +273,7 @@ impl<'a> Parser<'a> {
         let while_span = self.expect_keyword(Keyword::While)?;
         let exp = self.exp()?;
         let do_span = self.expect_keyword(Keyword::Do)?;
-        let block = self.block()?;
+        let block = self.block_()?;
         let end_span = self.expect_keyword(Keyword::End)?;
         Ok(Statement::While {
             while_span,
@@ -229,7 +287,7 @@ impl<'a> Parser<'a> {
     fn repeat(&mut self) -> R<Statement<'a>> {
         trace!("repeat {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let repeat_span = self.expect_keyword(Keyword::Repeat)?;
-        let block = self.block()?;
+        let block = self.block_()?;
         let until_span = self.expect_keyword(Keyword::Until)?;
         let exp = self.exp()?;
         Ok(Statement::Repeat {
@@ -245,14 +303,14 @@ impl<'a> Parser<'a> {
         let if_span = self.expect_keyword(Keyword::If)?;
         let test = self.exp()?;
         let then_span = self.expect_keyword(Keyword::Then)?;
-        let block = self.block()?;
+        let block = self.block_()?;
         let mut else_ifs = Vec::new();
         while self.at(Token::Keyword(Keyword::ElseIf)) {
             else_ifs.push(self.else_if()?)
         }
         let else_span = self.eat_keyword(Keyword::Else);
         let catch_all = if else_span.is_some() {
-            let block = self.block()?;
+            let block = self.block_()?;
             Some(block)
         } else {
             None
@@ -275,7 +333,7 @@ impl<'a> Parser<'a> {
         let else_if_span = self.expect_keyword(Keyword::ElseIf)?;
         let test = self.exp()?;
         let then_span = self.expect_keyword(Keyword::Then)?;
-        let block = self.block()?;
+        let block = self.block_()?;
         Ok(ElseIf {
             else_if_span,
             test,
@@ -302,7 +360,7 @@ impl<'a> Parser<'a> {
             None
         };
         let do_span = self.expect_keyword(Keyword::Do)?;
-        let block = self.block()?;
+        let block = self.block_()?;
         let end_span = self.expect_keyword(Keyword::End)?;
         Ok(Statement::For(ForLoop {
             for_span,
@@ -330,7 +388,7 @@ impl<'a> Parser<'a> {
         let in_span = self.expect_keyword(Keyword::In)?;
         let exp_list = self.exp_list()?;
         let do_span = self.expect_keyword(Keyword::Do)?;
-        let block = self.block()?;
+        let block = self.block_()?;
         let end_span = self.expect_keyword(Keyword::End)?;
         Ok(Statement::ForIn(ForInLoop {
             for_span,
@@ -361,10 +419,15 @@ impl<'a> Parser<'a> {
 
     fn function(&mut self, local: Option<Span>) -> R<Statement<'a>> {
         trace!("function {:?}, {:?}", self.look_ahead, self.look_ahead2);
-        self.expect_keyword(Keyword::Function)?;
+        let function = self.expect_keyword(Keyword::Function)?;
         let name = self.func_name()?;
         let body = self.func_body()?;
-        Ok(Statement::Function { local, name, body })
+        Ok(Statement::Function {
+            local,
+            function,
+            name,
+            body,
+        })
     }
 
     fn func_name(&mut self) -> R<FuncName<'a>> {
@@ -384,13 +447,13 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub fn func_body(&mut self) -> R<FuncBody<'a>> {
+    fn func_body(&mut self) -> R<FuncBody<'a>> {
         trace!("func_body {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let open_paren_span = self.expect_punct(Punct::OpenParen)?;
-        
+
         let par_list = self.par_list()?;
         let close_paren_span = self.expect_punct(Punct::CloseParen)?;
-        let block = self.block()?;
+        let block = self.block_()?;
         let end = self.expect_keyword(Keyword::End)?;
         Ok(FuncBody {
             open_paren_span,
@@ -401,7 +464,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn func_args(&mut self) -> R<(Args<'a>)> {
+    fn func_args(&mut self) -> R<Args<'a>> {
         trace!("func_args {:?}, {:?}", self.look_ahead, self.look_ahead2);
         match self.look_ahead() {
             Some(Token::Punct(Punct::OpenParen)) => {
@@ -435,7 +498,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn par_list(&mut self) -> R<ParList<'a>> {
+    fn par_list(&mut self) -> R<ParList<'a>> {
         trace!("par_list {:?}, {:?}", self.look_ahead, self.look_ahead2);
         if matches!(self.look_ahead(), Some(Token::Punct(Punct::CloseParen))) {
             return Ok(ParList::empty());
@@ -452,7 +515,7 @@ impl<'a> Parser<'a> {
         Ok(ParList { parts })
     }
 
-    pub fn par_list_entry(&mut self) -> R<ParListPart<'a>> {
+    fn par_list_entry(&mut self) -> R<ParListPart<'a>> {
         if let Ok(name) = self.name() {
             Ok(ParListPart::Name(name))
         } else {
@@ -461,7 +524,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn name(&mut self) -> R<Name<'a>> {
+    fn name(&mut self) -> R<Name<'a>> {
         trace!("name {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let span = self.look_ahead.as_ref().map(|i| i.span.clone());
         let name = self.expect_name()?;
@@ -473,7 +536,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub fn eat_name_attr(&mut self) -> R<Option<Attr<'a>>> {
+    fn eat_name_attr(&mut self) -> R<Option<Attr<'a>>> {
         trace!(
             "eat_name_attr {:?}, {:?}",
             self.look_ahead,
@@ -495,7 +558,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn expect_name(&mut self) -> R<Cow<'a, str>> {
+    fn expect_name(&mut self) -> R<Cow<'a, str>> {
         trace!("expect_name {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let name = if let Some(Token::Name(name)) = self.look_ahead() {
             name.clone()
@@ -513,7 +576,7 @@ impl<'a> Parser<'a> {
         Ok(name)
     }
 
-    pub fn exp_list(&mut self) -> R<Vec<ExpListItem<'a>>> {
+    fn exp_list(&mut self) -> R<Vec<ExpListItem<'a>>> {
         trace!("exp_list {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let first = self.exp()?;
         let mut ret = vec![ExpListItem::Expr(first)];
@@ -688,10 +751,14 @@ impl<'a> Parser<'a> {
         trace!("primary_exp {:?}, {:?}", self.look_ahead, self.look_ahead2);
         match &self.look_ahead() {
             Some(Token::Punct(Punct::OpenParen)) => {
-                self.expect_punct(Punct::OpenParen)?;
+                let open_span = self.expect_punct(Punct::OpenParen)?;
                 let inner = self.exp()?;
-                self.expect_punct(Punct::CloseParen)?;
-                Ok(inner)
+                let close_span = self.expect_punct(Punct::CloseParen)?;
+                Ok(Expression::Parened {
+                    open_span,
+                    expr: Box::new(inner),
+                    close_span,
+                })
             }
             Some(Token::Name(_)) => {
                 let name = self.name()?;
@@ -840,19 +907,19 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn next_token(&mut self) -> Option<Item<'a>> {
+    fn next_token(&mut self) -> Option<Item<'a>> {
         use std::mem::replace;
-        let mut next2 = self.lex.next();
+        let mut next2 = dbg!(self.lex.next());
         if let Some(item) = next2.as_ref() {
             if let Token::Comment(_) = &item.token {
-                self.comment_buffer.push(item.clone());
+                self.comment_buffer.push_back(item.clone());
             }
         }
         while matches!(next2.as_ref().map(|i| &i.token), Some(Token::Comment(_))) {
             next2 = self.lex.next();
             if let Some(item) = next2.as_ref() {
                 if let Token::Comment(_) = &item.token {
-                    self.comment_buffer.push(item.clone());
+                    self.comment_buffer.push_back(item.clone());
                 }
             }
         }
@@ -930,8 +997,6 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod test {
-    use std::clone;
-
     use super::*;
     use ast::Block;
 
@@ -951,12 +1016,12 @@ mod test {
         };
         parse_and_compare(
             lua,
-            Block(vec![
-                Statement::Expression(Expression::FuncCall(FunctionCall {
+            Block(vec![Statement::Expression(Expression::FuncCall(
+                FunctionCall {
                     prefix: Box::new(name),
                     args: args,
-                })),
-            ]),
+                },
+            ))]),
         );
     }
     #[test]
@@ -1029,28 +1094,16 @@ mod test {
         });
         parse_and_compare(
             lua,
-            Block(vec![Statement::Expression(
-                    Expression::FuncCall(
-                        FunctionCall {
-                            prefix: Box::new(name),
-                            args: Args::ExpList {
-                                open_paren: Span {
-                                    start: 5,
-                                    end: 6,
-                                },
-                                exprs: vec![
-                                    ExpListItem::Expr(
-                                        inner_call
-                                    )
-                                ],
-                                close_paren: Span {
-                                    start: 13,
-                                    end: 14,
-                                }
-                            }
-                        }
-                    )
-            )]),
+            Block(vec![Statement::Expression(Expression::FuncCall(
+                FunctionCall {
+                    prefix: Box::new(name),
+                    args: Args::ExpList {
+                        open_paren: Span { start: 5, end: 6 },
+                        exprs: vec![ExpListItem::Expr(inner_call)],
+                        close_paren: Span { start: 13, end: 14 },
+                    },
+                },
+            ))]),
         );
     }
 
@@ -1110,6 +1163,7 @@ mod test {
             lua,
             Block(vec![Statement::Function {
                 local: Some(Span { start: 0, end: 5 }),
+                function: Span { start: 6, end: 14 },
                 name: FuncName {
                     segments: vec![FuncNamePart::Name(Name::from_str("thing", 15))],
                 },
@@ -1131,7 +1185,6 @@ mod test {
                     ]),
                     end_span: Span { start: 76, end: 79 },
                 },
-                
             }]),
         );
     }
@@ -1151,29 +1204,20 @@ mod test {
             lua,
             Block(vec![
                 Statement::Assignment {
-                    local_span: Some(Span {
-                        start: 0,
-                        end: 5,
-                    }),
+                    local_span: Some(Span { start: 0, end: 5 }),
                     targets: vec![ExpListItem::Expr(Expression::name_from("a", 6))],
                     eq_span: Some(Span { start: 8, end: 9 }),
                     values: vec![ExpListItem::Expr(Expression::numeral_from("0", 10))],
                 },
                 Statement::Assignment {
-                    local_span: Some(Span {
-                        start: 20,
-                        end: 25,
-                    }),
+                    local_span: Some(Span { start: 20, end: 25 }),
                     targets: vec![ExpListItem::Expr(Expression::name_from("b", 26))],
                     eq_span: Some(Span { start: 28, end: 29 }),
                     values: vec![ExpListItem::Expr(Expression::numeral_from("1", 30))],
                 },
                 Statement::Assignment {
-                    local_span: Some(Span {
-                        start: 40,
-                        end: 45,
-                    }),
-                    targets: vec![ExpListItem::Expr(Expression::name_from("c",46))],
+                    local_span: Some(Span { start: 40, end: 45 }),
+                    targets: vec![ExpListItem::Expr(Expression::name_from("c", 46))],
                     eq_span: Some(Span { start: 48, end: 49 }),
                     values: vec![ExpListItem::Expr(Expression::Nil(Span {
                         start: 50,
@@ -1193,18 +1237,33 @@ mod test {
                             },
                             Field::Record {
                                 name: Expression::name_from("b", 111),
-                                eq: Span { start: 113, end: 114 },
+                                eq: Span {
+                                    start: 113,
+                                    end: 114,
+                                },
                                 value: Expression::name_from("b", 115),
-                                sep: Some(FieldSep::Comma(Span { start: 116, end: 117 })),
+                                sep: Some(FieldSep::Comma(Span {
+                                    start: 116,
+                                    end: 117,
+                                })),
                             },
                             Field::Record {
                                 name: Expression::name_from("c", 130),
-                                eq: Span { start: 132, end: 133 },
+                                eq: Span {
+                                    start: 132,
+                                    end: 133,
+                                },
                                 value: Expression::name_from("c", 134),
-                                sep: Some(FieldSep::Comma(Span { start: 135, end: 136 })),
+                                sep: Some(FieldSep::Comma(Span {
+                                    start: 135,
+                                    end: 136,
+                                })),
                             },
                         ],
-                        close_brace: Span { start: 145, end: 146 },
+                        close_brace: Span {
+                            start: 145,
+                            end: 146,
+                        },
                     })))],
                 }),
             ]),
@@ -1321,17 +1380,26 @@ mod test {
                 Statement::Expression(Expression::FuncCall(FunctionCall {
                     prefix: Box::new(Expression::name_from("print", 95)),
                     args: Args::ExpList {
-                        open_paren: Span { start: 100, end: 101 },
+                        open_paren: Span {
+                            start: 100,
+                            end: 101,
+                        },
                         exprs: vec![ExpListItem::Expr(Expression::Suffixed(Box::new(
                             Suffixed {
                                 subject: Expression::name_from("a", 101),
                                 property: SuffixedProperty::Name {
-                                    sep: SuffixSep::Dot(Span { start: 102, end: 103 }),
+                                    sep: SuffixSep::Dot(Span {
+                                        start: 102,
+                                        end: 103,
+                                    }),
                                     name: Name::from_str("two", 103),
                                 },
                             },
                         )))],
-                        close_paren: Span { start: 106, end: 107 },
+                        close_paren: Span {
+                            start: 106,
+                            end: 107,
+                        },
                     },
                 })),
             ]),
@@ -1464,10 +1532,7 @@ mod test {
             Block(vec![Statement::While {
                 while_span: Span { start: 9, end: 14 },
                 exp: Expression::True(Span { start: 15, end: 19 }),
-                do_span: Span {
-                    start: 20,
-                    end: 22,
-                },
+                do_span: Span { start: 20, end: 22 },
                 block: Block(vec![Statement::Expression(Expression::FuncCall(
                     FunctionCall {
                         prefix: Box::new(Expression::name_from("print", 35)),
@@ -1478,10 +1543,7 @@ mod test {
                         },
                     },
                 ))]),
-                end_span: Span {
-                    start: 57,
-                    end: 60,
-                },
+                end_span: Span { start: 57, end: 60 },
             }]),
         );
     }
@@ -1553,23 +1615,40 @@ mod test {
                                     "'never again'",
                                     94,
                                 ))],
-                                close_paren: Span { start: 107, end: 108 },
+                                close_paren: Span {
+                                    start: 107,
+                                    end: 108,
+                                },
                             },
                         },
                     ))]),
                 }],
-                else_span: Some(Span { start: 117, end: 121 }),
+                else_span: Some(Span {
+                    start: 117,
+                    end: 121,
+                }),
                 catch_all: Some(Block(vec![Statement::Expression(Expression::FuncCall(
                     FunctionCall {
                         prefix: Box::new(Expression::name_from("print", 134)),
                         args: Args::ExpList {
-                            open_paren: Span { start: 139, end: 140 },
-                            exprs: vec![ExpListItem::Expr(Expression::string_from("'always'", 140))],
-                            close_paren: Span { start: 148, end: 149 },
+                            open_paren: Span {
+                                start: 139,
+                                end: 140,
+                            },
+                            exprs: vec![ExpListItem::Expr(Expression::string_from(
+                                "'always'", 140,
+                            ))],
+                            close_paren: Span {
+                                start: 148,
+                                end: 149,
+                            },
                         },
                     },
                 ))])),
-                end_span: Span { start: 158, end: 161 },
+                end_span: Span {
+                    start: 158,
+                    end: 161,
+                },
             })]),
         );
     }
@@ -1633,10 +1712,7 @@ mod test {
                         },
                     },
                 ))]),
-                end_span: Span {
-                    start: 45,
-                    end: 48,
-                },
+                end_span: Span { start: 45, end: 48 },
             }]),
         )
     }
@@ -1650,6 +1726,7 @@ mod test {
             lua,
             Block(vec![Statement::Function {
                 local: None,
+                function: Span { start: 0, end: 8 },
                 name: FuncName {
                     segments: vec![FuncNamePart::Name(Name::from_str("thing", 9))],
                 },
@@ -1670,10 +1747,7 @@ mod test {
                                 op: UnaryOperator::Negate(Span { start: 42, end: 43 }),
                                 exp: Box::new(Expression::numeral_from("1", 43)),
                             }),
-                            ExpListItem::Comma(Span {
-                                start: 44,
-                                end: 45,
-                            }),
+                            ExpListItem::Comma(Span { start: 44, end: 45 }),
                             ExpListItem::Expr(Expression::VarArgs(Span { start: 46, end: 49 })),
                         ],
                     })]),
@@ -1697,7 +1771,11 @@ mod test {
                     field_list: vec![Field::Record {
                         name: Expression::string_from("'a'", 22),
                         eq: Span { start: 27, end: 28 },
-                        value: Expression::numeral_from("1", 30),
+                        value: Expression::Parened {
+                            open_span: Span { start: 29, end: 30 },
+                            expr: Box::new(Expression::numeral_from("1", 30)),
+                            close_span: Span { start: 31, end: 32 },
+                        },
                         sep: None,
                     }],
                     close_brace: Span { start: 41, end: 42 },
@@ -1730,16 +1808,138 @@ mod test {
     #[test]
     fn empty() {
         let lua = ";";
-        parse_and_compare(lua, Block(vec![Statement::Empty(Span {
-            start: 0,
-            end: 1,
-        },)]))
+        parse_and_compare(
+            lua,
+            Block(vec![Statement::Empty(Span { start: 0, end: 1 })]),
+        )
+    }
+
+    #[test]
+    fn parened() {
+        let lua = "a = (1 // 2) % 3";
+        parse_and_compare(
+            lua,
+            Block(vec![Statement::Assignment {
+                local_span: None,
+                targets: vec![ExpListItem::Expr(Expression::name_from("a", 0))],
+                eq_span: Some(Span { start: 2, end: 3 }),
+                values: vec![ExpListItem::Expr(Expression::BinOp {
+                    left: Box::new(Expression::Parened {
+                        open_span: Span { start: 4, end: 5 },
+                        expr: Box::new(Expression::BinOp {
+                            left: Box::new(Expression::numeral_from("1", 5)),
+                            op: BinaryOperator::FloorDivide(Span { start: 7, end: 9 }),
+                            right: Box::new(Expression::numeral_from("2", 10)),
+                        }),
+                        close_span: Span { start: 11, end: 12 },
+                    }),
+                    op: BinaryOperator::Modulo(Span { start: 13, end: 14 }),
+                    right: Box::new(Expression::numeral_from("3", 15)),
+                })],
+            }]),
+        );
+    }
+
+    #[test]
+    fn comment_handling() {
+        pretty_env_logger::try_init().ok();
+        let lua = "#!/bin/lua
+        ---EmmyLua style doc comment
+        ---@class
+        local Thing = {}
+        Thing.__index = Thing
+
+        ---Create a new thing
+        ---@returns Thing
+        function Thing.new()
+            local base = {
+                ---@field number
+                one = 0,
+                ---@field string,
+                two = '',
+            }
+            setmetatable(base, Thing)
+            return thing
+        end -- this should be included in the first one
+
+        ---Get the stuff from the thing
+        ---@returns number, string
+        function Thing:stuff() 
+            return self.one, self.two
+        end
+
+        -- weird comment all the way at the end...";
+        let mut p = Parser::new(lua.as_bytes());
+        let class = p.next().unwrap().unwrap();
+        assert_eq!(
+            &class.statement,
+            &Statement::Assignment {
+                local_span: Some(Span { start: 74, end: 79 }),
+                targets: vec![ExpListItem::Expr(Expression::name_from("Thing", 80)),],
+                eq_span: Some(Span { start: 86, end: 87 }),
+                values: vec![ExpListItem::Expr(Expression::TableCtor(Box::new(Table {
+                    open_brace: Span { start: 88, end: 89 },
+                    field_list: vec![],
+                    close_brace: Span { start: 89, end: 90 }
+                }))),],
+            }
+        );
+        assert_eq!(
+            class.comments.len(),
+            3,
+            "expected class comments to have 3: {:?}",
+            class.comments
+        );
+        let index = p.next().unwrap().unwrap();
+        assert_eq!(
+            &index.statement,
+            &Statement::Assignment {
+                local_span: None,
+                targets: vec![ExpListItem::Expr(Expression::Suffixed(Box::new(
+                    Suffixed {
+                        subject: Expression::name_from("Thing", 99),
+                        property: SuffixedProperty::Name {
+                            sep: SuffixSep::Dot(Span {
+                                start: 104,
+                                end: 105
+                            }),
+                            name: Name::from_str("__index", 105),
+                        }
+                    }
+                )))],
+                eq_span: Some(Span {
+                    start: 113,
+                    end: 114
+                }),
+                values: vec![ExpListItem::Expr(Expression::name_from("Thing", 115))],
+            }
+        );
+        assert_eq!(
+            index.comments.len(),
+            0,
+            "expected __index to have 0 comments: {:?}",
+            index.comments
+        );
+        let ctor = p.next().unwrap().unwrap();
+        assert_eq!(
+            ctor.comments.len(),
+            5,
+            "expected ctor comments to have 3: {:?}",
+            ctor.comments
+        );
+        let method = p.next().unwrap().unwrap();
+        assert_eq!(
+            method.comments.len(),
+            3,
+            "expected method comments to have 3: {:?}",
+            method.comments
+        );
     }
 
     #[track_caller]
     fn parse_and_compare(test: &str, target: Block) {
         let mut p = Parser::new(test.as_bytes());
-        let block = p.block().unwrap();
+        let block = p.block_().unwrap();
         compare_blocs(block, target);
     }
 

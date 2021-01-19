@@ -26,6 +26,25 @@
         {
             "type": "lldb",
             "request": "launch",
+            "name": "Debug unit test in library 'analisar::await::comment_handling'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=analisar"
+                ],
+                "filter": {
+                    "name": "analisar",
+                    "kind": "lib"
+                }
+            },
+            "args": ["--nocapture", "comment_handling"],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
             "name": "Debug unit tests in library 'analisar::print'",
             "cargo": {
                 "args": [

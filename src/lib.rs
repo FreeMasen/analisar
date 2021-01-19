@@ -15,6 +15,9 @@ pub use error::Error;
 
 type R<T> = Result<T, Error>;
 
+/// This parser will provide an AST
+/// without any whitespace or comment
+/// context provided.
 pub struct Parser<'a> {
     lex: SpannedLexer<'a>,
     look_ahead: Option<Item<'a>>,
@@ -77,13 +80,16 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn next(&mut self) -> Option<R<Block<'a>>> {
+    pub fn next(&mut self) -> Option<R<Statement<'a>>> {
         if self.look_ahead.is_none() {
             return None;
         }
-        Some(self.block())
+        Some(self.statement())
     }
 
+    /// Calling this at the top level of a file will end up parsing
+    /// the entire file. If you want logical sections of that file,
+    /// use `Parser::next` instead
     pub fn block(&mut self) -> R<Block<'a>> {
         trace!("block {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let mut statements = Vec::new();
@@ -819,6 +825,9 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Similar to the Parser, on a call to `next`
+/// will return a vector of the raw tokens from `lex_lua`
+/// along with the parsed `Statement`
 pub struct TokenBufferParser<'a> {
     inner: Parser<'a>,
 }
@@ -828,8 +837,9 @@ impl<'a> TokenBufferParser<'a> {
         let inner = Parser::new_with_token_buffer(b);
         Self { inner }
     }
-
-    pub fn next(&mut self) -> Option<R<(Vec<Item<'a>>, Block<'a>)>> {
+    /// Returns a tuple, the first element will be a `Vec` of the raw
+    /// `lex_lua::Item`s and the second element will be the parsed `Statement`
+    pub fn next(&mut self) -> Option<R<(Vec<Item<'a>>, Statement<'a>)>> {
         let inner_next = self.inner.next()?;
         match inner_next {
             Ok(next) => {

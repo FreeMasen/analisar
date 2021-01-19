@@ -1,5 +1,5 @@
 use bstr::BStr;
-use lex_lua::Span;
+use lex_lua::{Item, Span};
 use std::borrow::Cow;
 
 #[derive(Debug, PartialEq, Clone)]
@@ -7,6 +7,34 @@ pub struct Block<'a>(pub Vec<Statement<'a>>);
 impl<'a> Block<'a> {
     pub fn empty() -> Self {
         Self(Vec::new())
+    }
+    pub fn end(&self) -> Option<usize> {
+        let stmt = self.0.last()?;
+        stmt.end()
+    }
+}
+
+pub struct BlockWithComments<'a>(pub Vec<StatementWithComments<'a>>);
+
+impl<'a> BlockWithComments<'a> {
+    pub fn empty() -> Self {
+        Self(Vec::new())
+    }
+    pub fn end(&self) -> Option<usize> {
+        let stmt = self.0.last()?;
+        stmt.end()
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct StatementWithComments<'a> {
+    pub statement: Statement<'a>,
+    pub comments: Vec<Item<'a>>,
+}
+
+impl<'a> StatementWithComments<'a> {
+    pub fn end(&self) -> Option<usize> {
+        self.statement.end()
     }
 }
 
@@ -53,33 +81,108 @@ pub enum Statement<'a> {
     ForIn(ForInLoop<'a>),
     Function {
         local: Option<Span>,
+        function: Span,
         name: FuncName<'a>,
         body: FuncBody<'a>,
     },
     Return(RetStatement<'a>),
 }
 
-#[derive(Debug, PartialEq, Clone)]
-pub struct FunctionCall<'a> {
-    pub prefix: Box<Expression<'a>>,
-    pub args: Args<'a>,
-}
+impl<'a> Statement<'a> {
+    pub fn start(&self) -> Option<usize> {
+        match self {
+            Self::Expression(expr) => Some(expr.start()),
+            Self::Assignment {
+                local_span,
+                targets,
+                ..
+            } => {
+                if let Some(local) = local_span {
+                    Some(local.start)
+                } else {
+                    let first = targets.first()?;
+                    Some(first.start())
+                }
+            }
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum Args<'a> {
-    ExpList {
-        open_paren: Span,
-        exprs: Vec<ExpListItem<'a>>,
-        close_paren: Span,
-    },
-    Table(Table<'a>),
-    String(LiteralString<'a>),
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum ExpListItem<'a> {
-    Expr(Expression<'a>),
-    Comma(Span),
+            Self::Function {
+                local, function, ..
+            } => {
+                if let Some(local) = local {
+                    Some(local.start)
+                } else {
+                    Some(function.start)
+                }
+            }
+            Self::Return(ret_stat) => Some(
+                ret_stat
+                    .exprs
+                    .last()
+                    .map(ExpListItem::end)
+                    .unwrap_or(ret_stat.return_span.end),
+            ),
+            Self::Empty(span)
+            | Self::Break(span)
+            | Self::Label {
+                colons1_span: span, ..
+            }
+            | Self::Repeat {
+                repeat_span: span, ..
+            }
+            | Self::GoTo {
+                goto_span: span, ..
+            }
+            | Self::Do { do_span: span, .. }
+            | Self::While {
+                while_span: span, ..
+            }
+            | Self::If(If { if_span: span, .. })
+            | Self::For(ForLoop { for_span: span, .. })
+            | Self::ForIn(ForInLoop { for_span: span, .. }) => Some(span.start),
+        }
+    }
+    pub fn end(&self) -> Option<usize> {
+        match self {
+            Self::Empty(Span { end, .. }) => Some(*end),
+            Self::Expression(expr) => Some(expr.end()),
+            Self::Assignment {
+                local_span,
+                targets,
+                eq_span,
+                values,
+            } => {
+                if let Some(eq_span) = eq_span {
+                    Some(values.last().map(ExpListItem::end).unwrap_or(eq_span.end))
+                } else {
+                    if let Some(end) = targets.last().map(ExpListItem::end) {
+                        Some(end)
+                    } else {
+                        local_span.map(|s| s.end)
+                    }
+                }
+            }
+            Self::Label { colons2_span, .. } => Some(colons2_span.end),
+            Self::Break(Span { end, .. }) => Some(*end),
+            Self::GoTo { label, .. } => Some(label.end()),
+            Self::Repeat { exp, .. } => Some(exp.end()),
+            Self::Do { end_span, .. }
+            | Self::While { end_span, .. }
+            | Self::If(If { end_span, .. })
+            | Self::For(ForLoop { end_span, .. })
+            | Self::ForIn(ForInLoop { end_span, .. })
+            | Self::Function {
+                body: FuncBody { end_span, .. },
+                ..
+            } => Some(end_span.end),
+            Self::Return(ret_stat) => Some(
+                ret_stat
+                    .exprs
+                    .last()
+                    .map(ExpListItem::end)
+                    .unwrap_or(ret_stat.return_span.end),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -171,7 +274,7 @@ pub enum Expression<'a> {
     TableCtor(Box<Table<'a>>),
     Parened {
         open_span: Span,
-        exprs: Vec<ExpListItem<'a>>,
+        expr: Box<Expression<'a>>,
         close_span: Span,
     },
     BinOp {
@@ -188,6 +291,46 @@ pub enum Expression<'a> {
 }
 
 impl<'a> Expression<'a> {
+    pub fn start(&self) -> usize {
+        match self {
+            Self::Parened { open_span, .. } => open_span.start,
+            Self::Numeral(Numeral { span, .. }) => span.start,
+            Self::LiteralString(LiteralString { span, .. }) => span.start,
+            Self::Name(name) => name.start(),
+            Self::Nil(span) => span.start,
+            Self::Suffixed(suff) => suff.subject.start(),
+            Self::TableCtor(table) => table.open_brace.start,
+            Self::True(span) => span.start,
+            Self::UnaryOp { op, .. } => op.start(),
+            Self::BinOp { left, .. } => left.start(),
+            Self::VarArgs(span) => span.start,
+            Self::False(span) => span.start,
+            Self::FunctionDef(body) => body.open_paren_span.start,
+            Self::FuncCall(call) => call.prefix.start(),
+        }
+    }
+    pub fn end(&self) -> usize {
+        match self {
+            Self::Parened { close_span, .. } => close_span.end,
+            Self::Numeral(Numeral { span, .. }) => span.end,
+            Self::LiteralString(LiteralString { span, .. }) => span.end,
+            Self::Name(name) => name.end(),
+            Self::Nil(span) => span.end,
+            Self::Suffixed(suff) => match &suff.property {
+                SuffixedProperty::Name { name, .. } => name.end(),
+                SuffixedProperty::Computed { close_bracket, .. } => close_bracket.end,
+            },
+            Self::TableCtor(table) => table.close_brace.end,
+            Self::True(span) => span.end,
+            Self::UnaryOp { exp, .. } => exp.end(),
+            Self::BinOp { right, .. } => right.end(),
+            Self::VarArgs(span) => span.end,
+            Self::False(span) => span.end,
+            Self::FunctionDef(body) => body.end_span.end,
+            Self::FuncCall(call) => call.args.end(),
+        }
+    }
+
     pub fn name_from(s: &'a str, start: usize) -> Self {
         Self::Name(Name {
             name_span: Span {
@@ -312,6 +455,16 @@ pub struct Name<'a> {
 }
 
 impl<'a> Name<'a> {
+    pub fn start(&self) -> usize {
+        self.name_span.start
+    }
+    pub fn end(&self) -> usize {
+        if let Some(attr) = &self.attr {
+            attr.close_angle.end
+        } else {
+            self.name_span.end
+        }
+    }
     pub fn from_str(s: &'a str, start: usize) -> Self {
         Name {
             name_span: Span {
@@ -329,6 +482,54 @@ pub struct Attr<'a> {
     pub open_angle: Span,
     pub value: Cow<'a, str>,
     pub close_angle: Span,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct FunctionCall<'a> {
+    pub prefix: Box<Expression<'a>>,
+    pub args: Args<'a>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Args<'a> {
+    ExpList {
+        open_paren: Span,
+        exprs: Vec<ExpListItem<'a>>,
+        close_paren: Span,
+    },
+    Table(Table<'a>),
+    String(LiteralString<'a>),
+}
+
+impl<'a> Args<'a> {
+    pub fn end(&self) -> usize {
+        match self {
+            Args::ExpList { close_paren, .. } => close_paren.end,
+            Args::Table(t) => t.close_brace.end,
+            Args::String(s) => s.span.end,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum ExpListItem<'a> {
+    Expr(Expression<'a>),
+    Comma(Span),
+}
+
+impl<'a> ExpListItem<'a> {
+    fn start(&self) -> usize {
+        match self {
+            Self::Expr(expr) => expr.start(),
+            Self::Comma(comma) => comma.start,
+        }
+    }
+    fn end(&self) -> usize {
+        match self {
+            Self::Expr(expr) => expr.end(),
+            Self::Comma(comma) => comma.end,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -387,4 +588,14 @@ pub enum UnaryOperator {
     Not(Span),
     Length(Span),
     BitwiseNot(Span),
+}
+
+impl UnaryOperator {
+    pub fn start(&self) -> usize {
+        match self {
+            Self::Negate(span) | Self::Not(span) | Self::Length(span) | Self::BitwiseNot(span) => {
+                span.start
+            }
+        }
+    }
 }
