@@ -174,10 +174,8 @@ however there is also a `Vec` of tokens provided.
 
 ### aware::Parser
 
-The final parser that this crate provides is a fully context aware parser. This kind of parser
-could be used to build a code formatter or documentation generator since it includes all of
-the extra things our plain old `Parser` doesn't like comments or extra punctuation. Let's look
-at an example of that the out put of this one looks like.
+The final parser that this crate provides is a fully context aware parser. Let's look
+at an example of that the output of this one looks like.
 
 ```rust
 use analisar::aware::Parser;
@@ -261,7 +259,9 @@ Some(
 ```
 
 Notice this one looks quite a bit different from the other two. First of all the function call's name
-has an associated `Span` which represents to byte offsets for the token in the original string. Another
-thing it provides is a `Parened` expression, for representing when an expression has been put in parentheses.
-Finally we see the comments that apply to this statement are also provided, along with the additional span information
-you would be able to fully reconstruct the tokens into the order they appeared originally.
+has an associated `Span` which represents to byte offsets for the token in the original string, you'll
+notice similar spans across each entry in this tree. Another thing it provides is a `Parened` expression,
+for representing when an expression has been put in parentheses. Finally we see the comments that apply to
+this statement are also provided. With all 3 of these additions it would be possible to fully
+reconstruct the tokens into the order they appeared originally, which would be handy it you were building
+a code formatter or a document generator.
