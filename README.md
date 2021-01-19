@@ -7,13 +7,11 @@ A Lua parser for Rust
 
 ### Parser
 
-This crate provides 3 different APIs for parsing lua. The first is a fairly standard parser an AST,
-that provides no context at all to each of the items in the whitespace, punctuation, or keywords but
-instead a tree of Statements/Expressions that represent the intent of the programmer.
+This crate provides 3 different APIs for parsing lua. The first is a fairly standard parser over a
+fairly standard AST which provides no context at all in about whitespace, punctuation, or keywords.
+The provided AST is designed to represent the intent of the program over anything else
 
-This kind of parser could be used to build a tree walking interpreter. Here is an example:
-
-#### Example
+This kind of parser could be used to build a tree walking interpreter. Here is an example of the output:
 
 ```rust
 use analisar::Parser;
