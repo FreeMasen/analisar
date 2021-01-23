@@ -14,7 +14,7 @@ use ast::{
 use lex_lua::{Item, Keyword, Punct, Span, SpannedLexer, Token};
 use log::trace;
 
-mod ast;
+pub mod ast;
 use crate::error::Error;
 use crate::R;
 
