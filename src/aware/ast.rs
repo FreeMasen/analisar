@@ -20,6 +20,12 @@ impl<'a> BlockWithComments<'a> {
     pub fn empty() -> Self {
         Self(Vec::new())
     }
+
+    pub fn start(&self) -> Option<usize> {
+        let stmt = self.0.first()?;
+        stmt.start()
+    }
+
     pub fn end(&self) -> Option<usize> {
         let stmt = self.0.last()?;
         stmt.end()
@@ -33,6 +39,10 @@ pub struct StatementWithComments<'a> {
 }
 
 impl<'a> StatementWithComments<'a> {
+    pub fn start(&self) -> Option<usize> {
+        self.statement.start()
+    }
+
     pub fn end(&self) -> Option<usize> {
         self.statement.end()
     }
@@ -580,6 +590,39 @@ impl BinaryOperator {
             Self::Or(_) => (1, 1),
         }
     }
+
+    pub fn span(&self) -> &Span {
+        match self {
+            Self::Add(span)
+            | Self::Subtract(span)
+            | Self::Multiply(span)
+            | Self::Divide(span)
+            | Self::FloorDivide(span)
+            | Self::Power(span)
+            | Self::Modulo(span)
+            | Self::BitwiseAnd(span)
+            | Self::BitwiseXor(span)
+            | Self::BitwiseOr(span)
+            | Self::RightShift(span)
+            | Self::LeftShift(span)
+            | Self::Concatenate(span)
+            | Self::GreaterThan(span)
+            | Self::GreaterThanEqual(span)
+            | Self::LessThan(span)
+            | Self::LessThanEqual(span)
+            | Self::Equal(span)
+            | Self::NotEqual(span)
+            | Self::And(span)
+            | Self::Or(span) => span
+        }
+    }
+
+    pub fn start(&self) -> usize {
+        self.span().start
+    }
+    pub fn end(&self) -> usize {
+        self.span().end
+    }
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -597,5 +640,60 @@ impl UnaryOperator {
                 span.start
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    
+    #[test]
+    fn assign_bin_op_span() {
+        let block = parse_lua("i = 1 + 1");
+        assert_eq!(block.start(), Some(0));
+        assert_eq!(block.end(), Some(9));
+        let first_stmt =  block.0.first().unwrap();
+        match &first_stmt.statement {
+            Statement::Assignment {
+                targets,
+                eq_span,
+                values,
+                ..
+            } => {
+                let i = targets.first().unwrap();
+                assert_eq!(i.start(), 0);
+                assert_eq!(i.end(), 1);
+                let eq = eq_span.unwrap();
+                assert_eq!(eq.start, 2);
+                assert_eq!(eq.end, 3);
+                let bin = values.first().unwrap();
+                match bin {
+                    ExpListItem::Expr(exp) => match exp {
+                        Expression::BinOp {
+                            left,
+                            op,
+                            right,
+                        } => {
+                            assert_eq!(left.start(), 4);
+                            assert_eq!(left.end(), 5);
+                            assert_eq!(op.start(), 6);
+                            assert_eq!(op.end(), 7);
+                            assert_eq!(right.start(), 8);
+                            assert_eq!(right.end(), 9);
+                        },
+                        _ => panic!("Expected binary operation")
+                    },
+                    _ => panic!("Expected Expression"),
+                }
+            },
+            _ => panic!("Expected Statement::Assignment"),
+        }
+        
+    }
+
+    fn parse_lua<'a>(lua: &'a str) -> BlockWithComments<'a> {
+        use crate::aware::Parser;
+        let mut p = Parser::new(lua.as_bytes());
+        p.block().unwrap()
     }
 }
