@@ -133,6 +133,28 @@
         {
             "type": "lldb",
             "request": "launch",
+            "name": "Debug unit tests in library 'if_break_goto'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=analisar"
+                ],
+                "filter": {
+                    "name": "analisar",
+                    "kind": "lib"
+                }
+            },
+            "args": ["if_break_goto", "--nocapture"],
+            "env": {
+                "RUST_LOG": "analisar=trace"
+            },
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
             "name": "Debug example 'hello_world'",
             "cargo": {
                 "args": [

@@ -909,7 +909,7 @@ impl<'a> Parser<'a> {
 
     fn next_token(&mut self) -> Option<Item<'a>> {
         use std::mem::replace;
-        let mut next2 = dbg!(self.lex.next());
+        let mut next2 =self.lex.next();
         if let Some(item) = next2.as_ref() {
             if let Token::Comment(_) = &item.token {
                 self.comment_buffer.push_back(item.clone());

@@ -8,6 +8,10 @@ impl<'a> Block<'a> {
     pub fn empty() -> Self {
         Self(Vec::new())
     }
+    pub fn start(&self) -> Option<usize> {
+        let stmt = self.0.first()?;
+        stmt.start()
+    }
     pub fn end(&self) -> Option<usize> {
         let stmt = self.0.last()?;
         stmt.end()
@@ -649,7 +653,7 @@ mod test {
     
     #[test]
     fn assign_bin_op_span() {
-        let block = parse_lua("i = 1 + 1");
+        let block = parse_lua("i = 1 - 1");
         assert_eq!(block.start(), Some(0));
         assert_eq!(block.end(), Some(9));
         let first_stmt =  block.0.first().unwrap();
@@ -687,6 +691,72 @@ mod test {
                 }
             },
             _ => panic!("Expected Statement::Assignment"),
+        }
+        
+    }
+    #[test]
+    fn if_break_goto() {
+        let block = parse_lua("if 1 // 2 == 99 then
+    break
+else
+    goto top
+end");
+        assert_eq!(block.start(), Some(0));
+        assert_eq!(block.end(), Some(52));
+        let first_stmt =  block.0.first().unwrap();
+        match &first_stmt.statement {
+            Statement::If(If {
+                if_span,
+                test,
+                then_span,
+                block,
+                else_span,
+                catch_all,
+                end_span,
+                ..
+            }) => {
+                assert_eq!(if_span.start, 0);
+                assert_eq!(if_span.end, 2);
+                assert_eq!(test.start(), 3);
+                assert_eq!(test.end(), 15);
+                if let Expression::BinOp { left, op, right} = test {
+                    assert_eq!(left.start(), 3);
+                    assert_eq!(left.end(), 9);
+                    if let Expression::BinOp { left: left2, op: op2, right: right2 } = left.as_ref() {
+                        assert_eq!(left2.start(), 3);
+                        assert_eq!(left2.end(), 4);
+                        assert_eq!(op2.start(), 5);
+                        assert_eq!(op2.end(), 7);
+                        assert_eq!(right2.start(), 8);
+                        assert_eq!(right2.end(), 9);
+                    }
+                    assert_eq!(op.start(), 10);
+                    assert_eq!(op.end(), 12);
+                    assert_eq!(right.start(), 13);
+                    assert_eq!(right.end(), 15);
+                } else {
+                    panic!("Expected test to be BinOp");
+                }
+                assert_eq!(then_span.start, 16);
+                assert_eq!(then_span.end, 20);
+                assert_eq!(block.start(), Some(25));
+                assert_eq!(block.end(), Some(30));
+                let el = else_span.unwrap();
+                assert_eq!(el.start, 31);
+                assert_eq!(el.end, 35);
+                
+                if let Statement::GoTo { goto_span, label } = catch_all.as_ref().unwrap().0.first().unwrap() {
+                    assert_eq!(goto_span.start, 40);
+                    assert_eq!(goto_span.end, 44);
+                    assert_eq!(label.start(), 45);
+                    assert_eq!(label.end(), 48);
+                } else {
+                    panic!("Expected GoTo");
+                }
+                assert_eq!(end_span.start, 49);
+                assert_eq!(end_span.end, 52);
+            },
+            _ => panic!("Expected Statement::If"),
         }
         
     }
