@@ -752,12 +752,22 @@ end",
                 assert_eq!(then_span.end, 20);
                 assert_eq!(block.start(), Some(25));
                 assert_eq!(block.end(), Some(30));
+                let cons = block.0.first().unwrap();
+                assert_eq!(cons.start(), Some(25));
+                assert_eq!(cons.end(), Some(30));
+                if let Statement::Break(sp) = cons {
+                    assert_eq!(sp.start, 25);
+                    assert_eq!(sp.end, 30);
+                    
+                }
                 let el = else_span.unwrap();
                 assert_eq!(el.start, 31);
                 assert_eq!(el.end, 35);
-
+                let ca = catch_all.as_ref().unwrap().0.first().unwrap();
+                assert_eq!(ca.start(), Some(40));
+                assert_eq!(ca.end(), Some(48));
                 if let Statement::GoTo { goto_span, label } =
-                    catch_all.as_ref().unwrap().0.first().unwrap()
+                    ca
                 {
                     assert_eq!(goto_span.start, 40);
                     assert_eq!(goto_span.end, 44);
