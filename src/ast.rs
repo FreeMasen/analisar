@@ -1,21 +1,11 @@
+use bstr::BStr;
 use std::borrow::Cow;
 
-use bstr::BStr;
-
 #[derive(Debug, PartialEq)]
-pub struct Chunk<'a>(pub Block<'a>);
-
-#[derive(Debug, PartialEq)]
-pub struct Block<'a> {
-    pub statements: Vec<Statement<'a>>,
-    pub ret_stat: Option<RetStatement<'a>>,
-}
+pub struct Block<'a>(pub Vec<Statement<'a>>);
 impl<'a> Block<'a> {
     pub fn empty() -> Self {
-        Self {
-            statements: Vec::new(),
-            ret_stat: None,
-        }
+        Self(Vec::new())
     }
 }
 
@@ -32,14 +22,14 @@ pub enum Statement<'a> {
     Break,
     GoTo(Name<'a>),
     Do {
-        block: Box<Block<'a>>,
+        block: Block<'a>,
     },
     While {
         exp: Expression<'a>,
-        block: Box<Block<'a>>,
+        block: Block<'a>,
     },
     Repeat {
-        block: Box<Block<'a>>,
+        block: Block<'a>,
         exp: Expression<'a>,
     },
     If(If<'a>),
@@ -50,7 +40,6 @@ pub enum Statement<'a> {
         name: FuncName<'a>,
         body: FuncBody<'a>,
     },
-    AttrNameList {},
     Return(RetStatement<'a>),
 }
 
@@ -64,30 +53,8 @@ impl<'a> Statement<'a> {
 }
 
 #[derive(Debug, PartialEq)]
-struct VarList<'a>(Vec<Var<'a>>);
-#[derive(Debug, PartialEq)]
-pub enum Var<'a> {
-    Name(Name<'a>),
-    Index {
-        prefix: Box<PrefixExp<'a>>,
-        index: Box<Expression<'a>>,
-    },
-    Field {
-        prefix: Box<PrefixExp<'a>>,
-        field: Name<'a>,
-    },
-}
-
-#[derive(Debug, PartialEq)]
-pub enum PrefixExp<'a> {
-    Var(Var<'a>),
-    FunctionCall(FunctionCall<'a>),
-    Exp(Box<Expression<'a>>),
-}
-
-#[derive(Debug, PartialEq)]
 pub struct FunctionCall<'a> {
-    pub prefix: Box<PrefixExp<'a>>,
+    pub prefix: Box<Expression<'a>>,
     pub args: Args<'a>,
     pub method: bool,
 }
@@ -117,9 +84,9 @@ pub struct FuncName<'a> {
 #[derive(Debug, PartialEq)]
 pub struct If<'a> {
     pub test: Expression<'a>,
-    pub block: Box<Block<'a>>,
+    pub block: Block<'a>,
     pub else_ifs: Vec<ElseIf<'a>>,
-    pub catch_all: Option<Box<Block<'a>>>,
+    pub catch_all: Option<Block<'a>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -134,14 +101,14 @@ pub struct ForLoop<'a> {
     pub init: Expression<'a>,
     pub limit: Expression<'a>,
     pub step: Option<Expression<'a>>,
-    pub block: Box<Block<'a>>,
+    pub block: Block<'a>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct ForInLoop<'a> {
     pub name_list: NameList<'a>,
     pub exp_list: Vec<Expression<'a>>,
-    pub block: Box<Block<'a>>,
+    pub block: Block<'a>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -167,7 +134,7 @@ pub enum Expression<'a> {
         op: UnaryOperator,
         exp: Box<Expression<'a>>,
     },
-    Prefix(PrefixExp<'a>),
+    FuncCall(FunctionCall<'a>),
     Suffixed(Box<Suffixed<'a>>),
 }
 
@@ -177,18 +144,18 @@ impl<'a> Expression<'a> {
         Self::LiteralString(LiteralString(Cow::Borrowed(bs)))
     }
     pub fn func_call(subject: Expression<'a>, args: Args<'a>) -> Self {
-        Self::Prefix(PrefixExp::FunctionCall(FunctionCall {
-            prefix: Box::new(PrefixExp::Exp(Box::new(subject))),
+        Self::FuncCall(FunctionCall {
+            prefix: Box::new(subject),
             args,
             method: false,
-        }))
+        })
     }
     pub fn method_call(subject: Expression<'a>, args: Args<'a>) -> Self {
-        Self::Prefix(PrefixExp::FunctionCall(FunctionCall {
-            prefix: Box::new(PrefixExp::Exp(Box::new(subject))),
+        Self::FuncCall(FunctionCall {
+            prefix: Box::new(subject),
             args,
             method: true,
-        }))
+        })
     }
     pub fn binary(left: Expression<'a>, op: BinaryOperator, right: Expression<'a>) -> Self {
         Self::BinOp {

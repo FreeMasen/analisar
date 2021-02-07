@@ -1,23 +1,29 @@
 use std::borrow::Cow;
 
 use ast::{
-    Args, BinaryOperator, Block, Chunk, ElseIf, Expression, Field, ForInLoop, ForLoop, FuncBody,
-    FuncName, FunctionCall, If, LiteralString, Name, NameList, Numeral, ParList, PrefixExp,
-    RetStatement, Statement, Suffixed, Table, UnaryOperator,
+    Args, BinaryOperator, Block, ElseIf, Expression, Field, ForInLoop, ForLoop, FuncBody, FuncName,
+    FunctionCall, If, LiteralString, Name, NameList, Numeral, ParList, RetStatement, Statement,
+    Suffixed, Table, UnaryOperator,
 };
 use lex_lua::{Item, Keyword, Punct, SpannedLexer, Token};
 use log::trace;
 
 mod ast;
+pub mod aware;
 pub mod error;
 pub use error::Error;
 
 type R<T> = Result<T, Error>;
 
+/// This parser will provide an AST
+/// without any whitespace or comment
+/// context provided.
 pub struct Parser<'a> {
     lex: SpannedLexer<'a>,
     look_ahead: Option<Item<'a>>,
     look_ahead2: Option<Item<'a>>,
+    token_buffer: Vec<Item<'a>>,
+    capture_tokens: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -41,38 +47,57 @@ impl<'a> Parser<'a> {
             lex,
             look_ahead,
             look_ahead2,
+            token_buffer: Vec::new(),
+            capture_tokens: false,
         }
     }
 
-    pub fn next(&mut self) -> Option<R<Chunk<'a>>> {
+    fn new_with_token_buffer(bytes: &'a [u8]) -> Self {
+        let mut lex = SpannedLexer::new(bytes);
+        let mut look_ahead = None;
+        let mut look_ahead2 = None;
+        let mut token_buffer = Vec::new();
+        while let Some(i) = lex.next() {
+            token_buffer.push(i.clone());
+            if !matches!(i.token, Token::Comment(_)) {
+                look_ahead = Some(i);
+                break;
+            }
+        }
+        while let Some(i) = lex.next() {
+            token_buffer.push(i.clone());
+            if !matches!(i.token, Token::Comment(_)) {
+                look_ahead2 = Some(i);
+                break;
+            }
+        }
+        Self {
+            lex,
+            look_ahead,
+            look_ahead2,
+            token_buffer,
+            capture_tokens: true,
+        }
+    }
+
+    pub fn next(&mut self) -> Option<R<Statement<'a>>> {
         if self.look_ahead.is_none() {
             return None;
         }
-        Some(self.chunk())
+        Some(self.statement())
     }
 
-    pub fn chunk(&mut self) -> R<Chunk<'a>> {
-        Ok(Chunk(self.block()?))
-    }
-
+    /// Calling this at the top level of a file will end up parsing
+    /// the entire file. If you want logical sections of that file,
+    /// use `Parser::next` instead
     pub fn block(&mut self) -> R<Block<'a>> {
         trace!("block {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let mut statements = Vec::new();
-        let mut ret_stat = None;
         while !self.at_block_end() {
-            if matches!(self.look_ahead(), Some(Token::Keyword(Keyword::Return))) {
-                ret_stat = Some(self.ret_stat()?);
-                
-                break;
-            } else {
-                statements.push(self.statement()?);
-            }
+            statements.push(self.statement()?);
         }
 
-        Ok(Block {
-            statements,
-            ret_stat,
-        })
+        Ok(Block(statements))
     }
 
     pub fn statement(&mut self) -> R<Statement<'a>> {
@@ -99,9 +124,7 @@ impl<'a> Parser<'a> {
                 }
             }
             Some(Token::Punct(Punct::DoubleColon)) => self.label(),
-            Some(Token::Keyword(Keyword::Return)) => {
-                Ok(Statement::Return(self.ret_stat()?))
-            }
+            Some(Token::Keyword(Keyword::Return)) => Ok(Statement::Return(self.ret_stat()?)),
             _ => self.exp_stat(),
         }
     }
@@ -111,7 +134,7 @@ impl<'a> Parser<'a> {
         self.expect_keyword(Keyword::Return)?;
         let exps = if self.eat_punct(Punct::SemiColon) || self.at_block_end() {
             Vec::new()
-        } else { 
+        } else {
             self.exp_list()?
         };
         self.eat_punct(Punct::SemiColon);
@@ -200,9 +223,7 @@ impl<'a> Parser<'a> {
         self.expect_keyword(Keyword::Do)?;
         let block = self.block()?;
         self.expect_keyword(Keyword::End)?;
-        Ok(Statement::Do {
-            block: Box::new(block),
-        })
+        Ok(Statement::Do { block })
     }
 
     fn while_stmt(&mut self) -> R<Statement<'a>> {
@@ -212,10 +233,7 @@ impl<'a> Parser<'a> {
         self.expect_keyword(Keyword::Do)?;
         let block = self.block()?;
         self.expect_keyword(Keyword::End)?;
-        Ok(Statement::While {
-            exp,
-            block: Box::new(block),
-        })
+        Ok(Statement::While { exp, block })
     }
 
     fn repeat(&mut self) -> R<Statement<'a>> {
@@ -224,10 +242,7 @@ impl<'a> Parser<'a> {
         let block = self.block()?;
         self.expect_keyword(Keyword::Until)?;
         let exp = self.exp()?;
-        Ok(Statement::Repeat {
-            block: Box::new(block),
-            exp,
-        })
+        Ok(Statement::Repeat { block, exp })
     }
 
     fn if_stmt(&mut self) -> R<Statement<'a>> {
@@ -242,14 +257,14 @@ impl<'a> Parser<'a> {
         }
         let catch_all = if self.eat_keyword(Keyword::Else) {
             let block = self.block()?;
-            Some(Box::new(block))
+            Some(block)
         } else {
             None
         };
         self.expect_keyword(Keyword::End)?;
         Ok(Statement::If(If {
             test: exp,
-            block: Box::new(block),
+            block,
             else_ifs,
             catch_all,
         }))
@@ -288,7 +303,7 @@ impl<'a> Parser<'a> {
             init: exp,
             limit: exp2,
             step: exp3,
-            block: Box::new(block),
+            block,
         }))
     }
 
@@ -308,7 +323,7 @@ impl<'a> Parser<'a> {
         Ok(Statement::ForIn(ForInLoop {
             name_list,
             exp_list,
-            block: Box::new(block),
+            block,
         }))
     }
 
@@ -419,9 +434,14 @@ impl<'a> Parser<'a> {
     }
 
     pub fn eat_name_attr(&mut self) -> R<Option<Cow<'a, str>>> {
-        trace!("eat_name_attr {:?}, {:?}", self.look_ahead, self.look_ahead2);
+        trace!(
+            "eat_name_attr {:?}, {:?}",
+            self.look_ahead,
+            self.look_ahead2
+        );
         if matches!(self.look_ahead(), Some(Token::Punct(Punct::LessThan)))
-        && matches!(self.look_ahead2(), Some(Token::Name(_))) {
+            && matches!(self.look_ahead2(), Some(Token::Name(_)))
+        {
             self.expect_punct(Punct::LessThan)?;
             let name = self.expect_name()?;
             self.expect_punct(Punct::GreaterThan)?;
@@ -534,7 +554,9 @@ impl<'a> Parser<'a> {
         let mut expr = self.primary_exp()?;
         loop {
             match &self.look_ahead() {
-                Some(Token::Punct(Punct::Dot)) | Some(Token::Punct(Punct::Colon)) => expr = self.field(expr)?,
+                Some(Token::Punct(Punct::Dot)) | Some(Token::Punct(Punct::Colon)) => {
+                    expr = self.field(expr)?
+                }
                 Some(Token::Punct(Punct::OpenBracket)) => expr = self.index(expr)?,
                 Some(Token::Punct(Punct::OpenParen))
                 | Some(Token::Punct(Punct::OpenBrace))
@@ -578,12 +600,11 @@ impl<'a> Parser<'a> {
         let args = self.func_args()?;
 
         let call = FunctionCall {
-            prefix: Box::new(PrefixExp::Exp(Box::new(expr))),
+            prefix: Box::new(expr),
             args,
             method,
         };
-        let pre = PrefixExp::FunctionCall(call);
-        Ok(Expression::Prefix(pre))
+        Ok(Expression::FuncCall(call))
     }
 
     fn primary_exp(&mut self) -> R<Expression<'a>> {
@@ -593,7 +614,7 @@ impl<'a> Parser<'a> {
                 self.expect_punct(Punct::OpenParen)?;
                 let inner = self.exp()?;
                 self.expect_punct(Punct::CloseParen)?;
-                Ok(Expression::Prefix(PrefixExp::Exp(Box::new(inner))))
+                Ok(inner)
             }
             Some(Token::Name(_)) => {
                 let name = self.name()?;
@@ -723,8 +744,18 @@ impl<'a> Parser<'a> {
     pub fn next_token(&mut self) -> Option<Item<'a>> {
         use std::mem::replace;
         let mut next2 = self.lex.next();
+        if self.capture_tokens {
+            if let Some(item) = next2.as_ref() {
+                self.token_buffer.push(item.clone());
+            }
+        }
         while matches!(next2.as_ref().map(|i| &i.token), Some(Token::Comment(_))) {
             next2 = self.lex.next();
+            if self.capture_tokens {
+                if let Some(item) = next2.as_ref() {
+                    self.token_buffer.push(item.clone());
+                }
+            }
         }
         replace(&mut self.look_ahead, replace(&mut self.look_ahead2, next2))
     }
@@ -794,10 +825,37 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Similar to the Parser, on a call to `next`
+/// will return a vector of the raw tokens from `lex_lua`
+/// along with the parsed `Statement`
+pub struct TokenBufferParser<'a> {
+    inner: Parser<'a>,
+}
+
+impl<'a> TokenBufferParser<'a> {
+    pub fn new(b: &'a [u8]) -> Self {
+        let inner = Parser::new_with_token_buffer(b);
+        Self { inner }
+    }
+    /// Returns a tuple, the first element will be a `Vec` of the raw
+    /// `lex_lua::Item`s and the second element will be the parsed `Statement`
+    pub fn next(&mut self) -> Option<R<(Vec<Item<'a>>, Statement<'a>)>> {
+        let inner_next = self.inner.next()?;
+        match inner_next {
+            Ok(next) => {
+                let mut tokens = Vec::with_capacity(self.inner.token_buffer.len());
+                std::mem::swap(&mut self.inner.token_buffer, &mut tokens);
+                Some(Ok((tokens, next)))
+            }
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use ast::Block;
     use super::*;
+    use ast::Block;
 
     #[test]
     fn print() {
@@ -806,13 +864,7 @@ mod test {
         let name = Expression::name_from("print");
         let arg = Expression::string("'hello world'");
         let args = Args::ExpList(vec![arg]);
-        parse_and_compare(
-            lua,
-            Block {
-                statements: vec![Statement::func_call(name, args)],
-                ret_stat: None,
-            },
-        );
+        parse_and_compare(lua, Block(vec![Statement::func_call(name, args)]));
     }
     #[test]
     fn require() {
@@ -821,13 +873,7 @@ mod test {
         let name = Expression::name_from("require");
         let arg = "'lib'".into();
         let args = Args::String(arg);
-        parse_and_compare(
-            lua,
-            Block {
-                statements: vec![Statement::func_call(name, args)],
-                ret_stat: None,
-            },
-        );
+        parse_and_compare(lua, Block(vec![Statement::func_call(name, args)]));
     }
 
     #[test]
@@ -840,13 +886,7 @@ mod test {
             par_list: ParList::empty(),
         });
         let args = Args::ExpList(vec![cb]);
-        parse_and_compare(
-            lua,
-            Block {
-                statements: vec![Statement::func_call(name, args)],
-                ret_stat: None,
-            },
-        );
+        parse_and_compare(lua, Block(vec![Statement::func_call(name, args)]));
     }
     #[test]
     fn nested_calls() {
@@ -857,13 +897,13 @@ mod test {
         let inner_call = Expression::func_call(name2, Args::empty());
         parse_and_compare(
             lua,
-            Block {
-                statements: vec![Statement::func_call(name, Args::exp_list(vec![inner_call]))],
-                ret_stat: None,
-            },
+            Block(vec![Statement::func_call(
+                name,
+                Args::exp_list(vec![inner_call]),
+            )]),
         );
     }
-    
+
     #[test]
     fn chained_calls() {
         pretty_env_logger::try_init().ok();
@@ -872,10 +912,7 @@ mod test {
         let call = Expression::func_call(name, Args::empty());
         parse_and_compare(
             lua,
-            Block {
-                statements: vec![Statement::func_call(call, Args::exp_list(vec![]))],
-                ret_stat: None,
-            },
+            Block(vec![Statement::func_call(call, Args::exp_list(vec![]))]),
         );
     }
     #[test]
@@ -884,22 +921,14 @@ mod test {
         let lua = "if true then elseif false then else end";
         let stmt = Statement::If(If {
             test: Expression::True,
-            block: Box::new(Block::empty()),
-            else_ifs: vec![
-                ElseIf {
-                    test: Expression::False,
-                    block: Block::empty(),
-                }
-            ],
-            catch_all: Some(Box::new(Block::empty()))
+            block: Block::empty(),
+            else_ifs: vec![ElseIf {
+                test: Expression::False,
+                block: Block::empty(),
+            }],
+            catch_all: Some(Block::empty()),
         });
-        parse_and_compare(
-            lua,
-            Block {
-                statements: vec![stmt],
-                ret_stat: None,
-            },
-        );
+        parse_and_compare(lua, Block(vec![stmt]));
     }
 
     #[test]
@@ -908,37 +937,27 @@ mod test {
             local a = 0
             return a
         end";
-        parse_and_compare(lua, Block {
-            statements: vec![
-                Statement::Function {
-                    local: true,
-                    body: FuncBody {
-                        par_list: ParList::empty(),
-                        block: Block {
-                            statements: vec![
-                                Statement::Assignment {
-                                    local: true,
-                                    targets: vec![
-                                        Expression::name_from("a")
-                                    ],
-                                    values: vec![
-                                        Expression::numeral_from("0")
-                                    ]
-                                }
-                            ],
-                            ret_stat: Some(RetStatement(vec![
-                                Expression::name_from("a")
-                            ]))
+        parse_and_compare(
+            lua,
+            Block(vec![Statement::Function {
+                local: true,
+                body: FuncBody {
+                    par_list: ParList::empty(),
+                    block: Block(vec![
+                        Statement::Assignment {
+                            local: true,
+                            targets: vec![Expression::name_from("a")],
+                            values: vec![Expression::numeral_from("0")],
                         },
-                    },
-                    name: FuncName {
-                        dot_separated: vec!["thing".into()],
-                        method: None,
-                    }
-                }
-            ],
-            ret_stat: None
-        });
+                        Statement::Return(RetStatement(vec![Expression::name_from("a")])),
+                    ]),
+                },
+                name: FuncName {
+                    dot_separated: vec!["thing".into()],
+                    method: None,
+                },
+            }]),
+        );
     }
 
     #[test]
@@ -952,54 +971,42 @@ mod test {
             b = b,
             c = c,
         }";
-        parse_and_compare(lua, Block {
-            statements: vec![
+        parse_and_compare(
+            lua,
+            Block(vec![
                 Statement::Assignment {
                     local: true,
-                    targets: vec![
-                        Expression::name_from("a")
-                    ],
-                    values: vec![
-                        Expression::numeral_from("0"),
-                    ]
+                    targets: vec![Expression::name_from("a")],
+                    values: vec![Expression::numeral_from("0")],
                 },
                 Statement::Assignment {
                     local: true,
-                    targets: vec![
-                        Expression::name_from("b"),
-                    ],
-                    values: vec![
-                        Expression::numeral_from("1"),
-                    ]
+                    targets: vec![Expression::name_from("b")],
+                    values: vec![Expression::numeral_from("1")],
                 },
                 Statement::Assignment {
                     local: true,
-                    targets: vec![
-                        Expression::name_from("c")
-                    ],
-                    values: vec![
-                        Expression::Nil,
-                    ]
+                    targets: vec![Expression::name_from("c")],
+                    values: vec![Expression::Nil],
                 },
-            ],
-            ret_stat: Some(RetStatement(vec![
-                Expression::TableCtor(Box::new(Table {
-                field_list: vec![
-                    Field::Record {
-                        name: Expression::name_from("a"),
-                        value: Expression::name_from("a"),
-                    },
-                    Field::Record {
-                        name: Expression::name_from("b"),
-                        value: Expression::name_from("b"),
-                    },
-                    Field::Record {
-                        name: Expression::name_from("c"),
-                        value: Expression::name_from("c"),
-                    },
-                ]
-            }))]))
-        });
+                Statement::Return(RetStatement(vec![Expression::TableCtor(Box::new(Table {
+                    field_list: vec![
+                        Field::Record {
+                            name: Expression::name_from("a"),
+                            value: Expression::name_from("a"),
+                        },
+                        Field::Record {
+                            name: Expression::name_from("b"),
+                            value: Expression::name_from("b"),
+                        },
+                        Field::Record {
+                            name: Expression::name_from("c"),
+                            value: Expression::name_from("c"),
+                        },
+                    ],
+                }))])),
+            ]),
+        );
     }
     #[test]
     fn assignments() {
@@ -1007,50 +1014,38 @@ mod test {
         a.b = 1
         a['c'] = 2
         ";
-        parse_and_compare(lua, Block {
-            statements: vec![
+        parse_and_compare(
+            lua,
+            Block(vec![
                 Statement::Assignment {
                     local: true,
-                    targets: vec![
-                        Expression::name_from("a"),
-                    ],
-                    values: vec![
-                        Expression::TableCtor(Box::new(Table {
-                            field_list: vec![],
-                        }))
-                    ]
+                    targets: vec![Expression::name_from("a")],
+                    values: vec![Expression::TableCtor(Box::new(Table {
+                        field_list: vec![],
+                    }))],
                 },
                 Statement::Assignment {
                     local: false,
-                    targets: vec![
-                        Expression::Suffixed(Box::new(Suffixed {
-                            subject: Expression::name_from("a"),
-                            property: Expression::name_from("b"),
-                            computed: false,
-                            method: false,
-                        }))
-                    ],
-                    values: vec![
-                        Expression::Numeral(Numeral(Cow::Borrowed("1")))
-                    ]
+                    targets: vec![Expression::Suffixed(Box::new(Suffixed {
+                        subject: Expression::name_from("a"),
+                        property: Expression::name_from("b"),
+                        computed: false,
+                        method: false,
+                    }))],
+                    values: vec![Expression::Numeral(Numeral(Cow::Borrowed("1")))],
                 },
                 Statement::Assignment {
                     local: false,
-                    targets: vec![
-                        Expression::Suffixed(Box::new(Suffixed {
-                            subject: Expression::name_from("a"),
-                            property: Expression::string("'c'"),
-                            computed: true,
-                            method: false,
-                        }))
-                    ],
-                    values: vec![
-                        Expression::numeral_from("2")
-                    ]
+                    targets: vec![Expression::Suffixed(Box::new(Suffixed {
+                        subject: Expression::name_from("a"),
+                        property: Expression::string("'c'"),
+                        computed: true,
+                        method: false,
+                    }))],
+                    values: vec![Expression::numeral_from("2")],
                 },
-            ],
-            ret_stat: None,
-        });
+            ]),
+        );
     }
 
     #[test]
@@ -1062,61 +1057,47 @@ mod test {
         print(a.one)
         print(a.two)
         ";
-        parse_and_compare(lua, Block {
-            statements: vec![
+        parse_and_compare(
+            lua,
+            Block(vec![
                 Statement::Assignment {
                     local: false,
-                    targets: vec![
-                        Expression::name_from("a"),
-                    ],
-                    values: vec![
-                        Expression::TableCtor(Box::new(Table {
-                            field_list: vec![
-                                Field::Record {
-                                    name: Expression::name_from("one"),
-                                    value: Expression::LiteralString("'one'".into()),
-                                },
-                                Field::Record {
-                                    name: Expression::name_from("two"),
-                                    value: Expression::LiteralString("'two'".into()),
-                                }
-                            ]
-                        }))
-                    ]
+                    targets: vec![Expression::name_from("a")],
+                    values: vec![Expression::TableCtor(Box::new(Table {
+                        field_list: vec![
+                            Field::Record {
+                                name: Expression::name_from("one"),
+                                value: Expression::LiteralString("'one'".into()),
+                            },
+                            Field::Record {
+                                name: Expression::name_from("two"),
+                                value: Expression::LiteralString("'two'".into()),
+                            },
+                        ],
+                    }))],
                 },
-                Statement::Expression(Expression::Prefix(
-                    PrefixExp::FunctionCall(FunctionCall {
-                        prefix: Box::new(PrefixExp::Exp(Box::new(Expression::name_from("print")))),
+                Statement::Expression(Expression::FuncCall(FunctionCall {
+                    prefix: Box::new(Expression::name_from("print")),
+                    method: false,
+                    args: Args::ExpList(vec![Expression::Suffixed(Box::new(Suffixed {
                         method: false,
-                        args: Args::ExpList(vec![
-                            Expression::Suffixed(Box::new(Suffixed {
-                                method: false,
-                                computed: false,
-                                subject: Expression::name_from("a"),
-                                property: Expression::name_from("one"),
-                            }))
-                        ])
-
-                    })
-                )),
-                Statement::Expression(Expression::Prefix(
-                    PrefixExp::FunctionCall(FunctionCall {
-                        prefix: Box::new(PrefixExp::Exp(Box::new(Expression::name_from("print"),))),
+                        computed: false,
+                        subject: Expression::name_from("a"),
+                        property: Expression::name_from("one"),
+                    }))]),
+                })),
+                Statement::Expression(Expression::FuncCall(FunctionCall {
+                    prefix: Box::new(Expression::name_from("print")),
+                    method: false,
+                    args: Args::ExpList(vec![Expression::Suffixed(Box::new(Suffixed {
                         method: false,
-                        args: Args::ExpList(vec![
-                            Expression::Suffixed(Box::new(Suffixed {
-                                method: false,
-                                computed: false,
-                                subject: Expression::name_from("a"),
-                                property: Expression::name_from("two"),
-                            }))
-                        ])
-
-                    })
-                )),
-            ],
-            ret_stat: None
-        });
+                        computed: false,
+                        subject: Expression::name_from("a"),
+                        property: Expression::name_from("two"),
+                    }))]),
+                })),
+            ]),
+        );
     }
 
     #[test]
@@ -1127,22 +1108,18 @@ mod test {
         goto top
         ";
 
-        parse_and_compare(lua, Block {
-            statements: vec![
+        parse_and_compare(
+            lua,
+            Block(vec![
                 Statement::Label("top".into()),
-                Statement::Expression(Expression::Prefix(
-                    PrefixExp::FunctionCall(FunctionCall {
-                        prefix: Box::new(PrefixExp::Exp(Box::new(Expression::name_from("print")))),
-                        method: false,
-                        args: Args::ExpList(vec![
-                            Expression::string("'loop'")
-                        ])
-                    })
-                )),
+                Statement::Expression(Expression::FuncCall(FunctionCall {
+                    prefix: Box::new(Expression::name_from("print")),
+                    method: false,
+                    args: Args::ExpList(vec![Expression::string("'loop'")]),
+                })),
                 Statement::GoTo("top".into()),
-            ],
-            ret_stat: None
-        });
+            ]),
+        );
     }
 
     #[test]
@@ -1153,23 +1130,16 @@ mod test {
             break
         end
         ";
-        parse_and_compare(lua, Block {
-            statements: vec![
-                Statement::For(ForLoop {
-                    init_name: "i".into(),
-                    init: Expression::numeral_from("0"),
-                    limit: Expression::numeral_from("10"),
-                    step: Some(Expression::numeral_from("1")),
-                    block: Box::new(Block {
-                        statements: vec![
-                            Statement::Break,
-                        ],
-                        ret_stat: None,                        
-                    })
-                })
-            ],
-            ret_stat: None,
-        });
+        parse_and_compare(
+            lua,
+            Block(vec![Statement::For(ForLoop {
+                init_name: "i".into(),
+                init: Expression::numeral_from("0"),
+                limit: Expression::numeral_from("10"),
+                step: Some(Expression::numeral_from("1")),
+                block: Block(vec![Statement::Break]),
+            })]),
+        );
     }
 
     #[test]
@@ -1179,45 +1149,30 @@ mod test {
             print(i)
         end
         ";
-        parse_and_compare(lua, Block {
-            statements: vec![
-                Statement::ForIn(ForInLoop {
-                    name_list: NameList(vec!["i".into(),"v".into()]),
-                    exp_list: vec![
-                        Expression::Prefix(PrefixExp::FunctionCall(FunctionCall {
-                            prefix: Box::new(PrefixExp::Exp(Box::new(Expression::name_from("ipairs")))),
-                            args: Args::ExpList(vec![
-                                Expression::TableCtor(Box::new(
-                                    Table {
-                                        field_list: vec![
-                                            Field::List(Expression::numeral_from("1")),
-                                            Field::List(Expression::numeral_from("2")),
-                                            Field::List(Expression::numeral_from("3")),
-                                        ]
-                                    }
-                                ))
-                            ]),
-                            method: false,
-                        }))
-                    ],
-                    block: Box::new(Block {
-                        statements: vec![
-                            Statement::Expression(Expression::Prefix(
-                                PrefixExp::FunctionCall(FunctionCall {
-                                    prefix: Box::new(PrefixExp::Exp(Box::new(Expression::name_from("print"),))),
-                                    method: false,
-                                    args: Args::ExpList(vec![
-                                        Expression::name_from("i"),
-                                    ])
-                                })
-                            )),
+        parse_and_compare(
+            lua,
+            Block(vec![Statement::ForIn(ForInLoop {
+                name_list: NameList(vec!["i".into(), "v".into()]),
+                exp_list: vec![Expression::FuncCall(FunctionCall {
+                    prefix: Box::new(Expression::name_from("ipairs")),
+                    args: Args::ExpList(vec![Expression::TableCtor(Box::new(Table {
+                        field_list: vec![
+                            Field::List(Expression::numeral_from("1")),
+                            Field::List(Expression::numeral_from("2")),
+                            Field::List(Expression::numeral_from("3")),
                         ],
-                        ret_stat: None,                        
-                    })
-                })
-            ],
-            ret_stat: None,
-        });
+                    }))]),
+                    method: false,
+                })],
+                block: Block(vec![Statement::Expression(Expression::FuncCall(
+                    FunctionCall {
+                        prefix: Box::new(Expression::name_from("print")),
+                        method: false,
+                        args: Args::ExpList(vec![Expression::name_from("i")]),
+                    },
+                ))]),
+            })]),
+        );
     }
 
     #[test]
@@ -1227,28 +1182,19 @@ mod test {
             print('loop')
         end
         ";
-        parse_and_compare(lua, Block {
-            statements: vec![
-                Statement::While {
-                    exp: Expression::True,
-                    block: Box::new(Block {
-                        statements: vec![
-                            Statement::Expression(Expression::Prefix(
-                                PrefixExp::FunctionCall(FunctionCall {
-                                    prefix: Box::new(PrefixExp::Exp(Box::new(Expression::name_from("print")))),
-                                    method: false,
-                                    args: Args::ExpList(vec![
-                                        Expression::string("'loop'")
-                                    ])
-                                })
-                            )),
-                        ],
-                        ret_stat: None,
-                    })
-                }
-            ],
-            ret_stat: None,
-        });
+        parse_and_compare(
+            lua,
+            Block(vec![Statement::While {
+                exp: Expression::True,
+                block: Block(vec![Statement::Expression(Expression::FuncCall(
+                    FunctionCall {
+                        prefix: Box::new(Expression::name_from("print")),
+                        method: false,
+                        args: Args::ExpList(vec![Expression::string("'loop'")]),
+                    },
+                ))]),
+            }]),
+        );
     }
 
     #[test]
@@ -1258,28 +1204,19 @@ mod test {
             print('loop')
         until true
         ";
-        parse_and_compare(lua, Block {
-            statements: vec![
-                Statement::Repeat {
-                    exp: Expression::True,
-                    block: Box::new(Block {
-                        statements: vec![
-                            Statement::Expression(Expression::Prefix(
-                                PrefixExp::FunctionCall(FunctionCall {
-                                    prefix: Box::new(PrefixExp::Exp(Box::new(Expression::name_from("print"),))),
-                                    method: false,
-                                    args: Args::ExpList(vec![
-                                        Expression::string("'loop'")
-                                    ])
-                                })
-                            )),
-                        ],
-                        ret_stat: None,
-                    })
-                }
-            ],
-            ret_stat: None,
-        });
+        parse_and_compare(
+            lua,
+            Block(vec![Statement::Repeat {
+                exp: Expression::True,
+                block: Block(vec![Statement::Expression(Expression::FuncCall(
+                    FunctionCall {
+                        prefix: Box::new(Expression::name_from("print")),
+                        method: false,
+                        args: Args::ExpList(vec![Expression::string("'loop'")]),
+                    },
+                ))]),
+            }]),
+        );
     }
 
     #[test]
@@ -1293,101 +1230,60 @@ mod test {
             print('always')
         end
         ";
-        parse_and_compare(lua, Block {
-            statements: vec![
-                Statement::If(
-                    If {
-                        test: Expression::False,
-                        block: Box::new(Block {
-                            statements: vec![
-                                Statement::Expression(Expression::Prefix(
-                                    PrefixExp::FunctionCall(FunctionCall {
-                                        prefix: Box::new(PrefixExp::Exp(Box::new(Expression::name_from("print")))),
-                                        method: false,
-                                        args: Args::ExpList(vec![
-                                            Expression::string("'never'")
-                                        ])
-                                    })
-                                ))
-                            ],
-                            ret_stat: None,
-                        }),
-                        else_ifs: vec![
-                            ElseIf {
-                                test: Expression::False,
-                                block: Block {
-                                    statements: vec![
-                                        Statement::Expression(Expression::Prefix(
-                                            PrefixExp::FunctionCall(FunctionCall {
-                                                prefix: Box::new(PrefixExp::Exp(Box::new(Expression::name_from("print")))),
-                                                method: false,
-                                                args: Args::ExpList(vec![
-                                                    Expression::string("'never again'")
-                                                ])
-                                            })
-                                        ))
-                                    ],
-                                    ret_stat: None,
-                                }
-                            }
-                        ],
-                        catch_all: Some(Box::new(Block {
-                            statements: vec![
-                                Statement::Expression(Expression::Prefix(
-                                    PrefixExp::FunctionCall(FunctionCall {
-                                        prefix: Box::new(PrefixExp::Exp(Box::new(Expression::name_from("print")))),
-                                        method: false,
-                                        args: Args::ExpList(vec![
-                                            Expression::string("'always'")
-                                        ])
-                                    })
-                                ))
-                            ],
-                            ret_stat: None,
-                        }))
-                    }
-                )
-            ],
-            ret_stat: None,
-        });
+        parse_and_compare(
+            lua,
+            Block(vec![Statement::If(If {
+                test: Expression::False,
+                block: Block(vec![Statement::Expression(Expression::FuncCall(
+                    FunctionCall {
+                        prefix: Box::new(Expression::name_from("print")),
+                        method: false,
+                        args: Args::ExpList(vec![Expression::string("'never'")]),
+                    },
+                ))]),
+                else_ifs: vec![ElseIf {
+                    test: Expression::False,
+                    block: Block(vec![Statement::Expression(Expression::FuncCall(
+                        FunctionCall {
+                            prefix: Box::new(Expression::name_from("print")),
+                            method: false,
+                            args: Args::ExpList(vec![Expression::string("'never again'")]),
+                        },
+                    ))]),
+                }],
+                catch_all: Some(Block(vec![Statement::Expression(Expression::FuncCall(
+                    FunctionCall {
+                        prefix: Box::new(Expression::name_from("print")),
+                        method: false,
+                        args: Args::ExpList(vec![Expression::string("'always'")]),
+                    },
+                ))])),
+            })]),
+        );
     }
 
     #[test]
     fn assignment() {
-        parse_and_compare("a = 1", Block {
-            statements: vec![
-                Statement::Assignment {
-                    local: false,
-                    targets: vec![
-                        Expression::name_from("a"),
-                    ],
-                    values: vec![
-                        Expression::numeral_from("1")
-                    ],
-                }
-            ],
-            ret_stat: None,
-        });
+        parse_and_compare(
+            "a = 1",
+            Block(vec![Statement::Assignment {
+                local: false,
+                targets: vec![Expression::name_from("a")],
+                values: vec![Expression::numeral_from("1")],
+            }]),
+        );
     }
 
     #[test]
     fn multi_assignment() {
-        parse_and_compare("a, b = 1, 2", Block {
-            statements: vec![
-                Statement::Assignment {
-                    local: false,
-                    targets: vec![
-                        Expression::name_from("a"),
-                        Expression::name_from("b"),
-                    ],
-                    values: vec![
-                        Expression::numeral_from("1"),
-                        Expression::numeral_from("2")
-                    ],
-                }
-            ],
-            ret_stat: None,
-        });
+        parse_and_compare(
+            "a, b = 1, 2",
+            Block(vec![Statement::Assignment {
+                local: false,
+                targets: vec![Expression::name_from("a"), Expression::name_from("b")],
+                values: vec![Expression::numeral_from("1"), Expression::numeral_from("2")],
+            }]),
+        );
     }
 
     #[test]
@@ -1396,29 +1292,23 @@ mod test {
         do
             print(1 + 1)
         end";
-        parse_and_compare(lua, Block {
-            ret_stat: None,
-            statements: vec![
-                Statement::Do {
-                    block: Box::new(Block {
-                        statements: vec![
-                            Statement::Expression(Expression::Prefix(PrefixExp::FunctionCall(FunctionCall {
-                                prefix: Box::new(PrefixExp::Exp(Box::new(Expression::name_from("print")))),
-                                args: Args::ExpList(vec![
-                                    Expression::BinOp {
-                                        left: Box::new(Expression::numeral_from("1")),
-                                        op: BinaryOperator::Add,
-                                        right: Box::new(Expression::numeral_from("1")),
-                                    }
-                                ]),
-                                method: false,
-                            })))
-                        ],
-                        ret_stat: None,
-                    })
-                }
-            ],
-        })
+
+        parse_and_compare(
+            lua,
+            Block(vec![Statement::Do {
+                block: Block(vec![Statement::Expression(Expression::FuncCall(
+                    FunctionCall {
+                        prefix: Box::new(Expression::name_from("print")),
+                        args: Args::ExpList(vec![Expression::BinOp {
+                            left: Box::new(Expression::numeral_from("1")),
+                            op: BinaryOperator::Add,
+                            right: Box::new(Expression::numeral_from("1")),
+                        }]),
+                        method: false,
+                    },
+                ))]),
+            }]),
+        )
     }
 
     #[test]
@@ -1426,36 +1316,29 @@ mod test {
         let lua = "function thing(a, ...)
             return -1, ...
         end";
-        parse_and_compare(lua, Block {
-            statements: vec![
-                Statement::Function {
-                    local: false,
-                    name: FuncName {
-                        dot_separated: vec!["thing".into()],
-                        method: None,
+        parse_and_compare(
+            lua,
+            Block(vec![Statement::Function {
+                local: false,
+                name: FuncName {
+                    dot_separated: vec!["thing".into()],
+                    method: None,
+                },
+                body: FuncBody {
+                    par_list: ParList {
+                        names: NameList(vec!["a".into()]),
+                        var_args: true,
                     },
-                    body: FuncBody {
-                        par_list: ParList {
-                            names: NameList(vec![
-                                "a".into()
-                            ]),
-                            var_args: true,
+                    block: Block(vec![Statement::Return(RetStatement(vec![
+                        Expression::UnaryOp {
+                            op: UnaryOperator::Negate,
+                            exp: Box::new(Expression::numeral_from("1")),
                         },
-                        block: Block {
-                            statements: vec![],
-                            ret_stat: Some(RetStatement(vec![
-                                Expression::UnaryOp {
-                                    op: UnaryOperator::Negate,
-                                    exp: Box::new(Expression::numeral_from("1"))
-                                },
-                                Expression::VarArgs,
-                            ]))
-                        }
-                    }
-                }
-            ],
-            ret_stat: None,
-        })
+                        Expression::VarArgs,
+                    ]))]),
+                },
+            }]),
+        )
     }
 
     #[test]
@@ -1463,49 +1346,40 @@ mod test {
         let lua = "return {
             ['a'] = (1)
         }";
-        parse_and_compare(lua, Block {
-            statements: vec![],
-            ret_stat: Some(RetStatement(vec![
+        parse_and_compare(
+            lua,
+            Block(vec![Statement::Return(RetStatement(vec![
                 Expression::TableCtor(Box::new(Table {
-                    field_list: vec![
-                        Field::Record {
-                            name: Expression::string("'a'"),
-                            value: Expression::numeral_from("1"),
-                        }
-                    ]
-                }))
-            ])),
-        });
+                    field_list: vec![Field::Record {
+                        name: Expression::string("'a'"),
+                        value: Expression::numeral_from("1"),
+                    }],
+                })),
+            ]))]),
+        );
     }
-    
+
     #[test]
     fn list_table_field() {
         let lua = "return {
             1
         }";
-        parse_and_compare(lua, Block {
-            statements: vec![],
-            ret_stat: Some(RetStatement(vec![
+        parse_and_compare(
+            lua,
+            Block(vec![Statement::Return(RetStatement(vec![
                 Expression::TableCtor(Box::new(Table {
-                    field_list: vec![
-                        Field::List(Expression::numeral_from("1"))
-                    ]
-                }))
-            ])),
-        });
+                    field_list: vec![Field::List(Expression::numeral_from("1"))],
+                })),
+            ]))]),
+        );
     }
 
     #[test]
     fn empty() {
         let lua = ";";
-        parse_and_compare(lua, Block {
-            statements: vec![
-                Statement::Empty,
-            ],
-            ret_stat: None,
-        })
+        parse_and_compare(lua, Block(vec![Statement::Empty]))
     }
-    
+
     #[track_caller]
     fn parse_and_compare(test: &str, target: Block) {
         let mut p = Parser::new(test.as_bytes());
@@ -1515,7 +1389,7 @@ mod test {
 
     #[track_caller]
     fn compare_blocs(test: Block, target: Block) {
-        for (lhs, rhs) in test.statements.iter().zip(target.statements.iter()) {
+        for (lhs, rhs) in test.0.iter().zip(target.0.iter()) {
             assert_eq!(
                 lhs, rhs,
                 "Invalid statement, expected {:?}, found {:?}",
