@@ -589,8 +589,8 @@ impl BinaryOperator {
         }
     }
 
-    pub fn span(&self) -> &Span {
-        match self {
+    pub fn span(&self) -> Span {
+        *match self {
             Self::Add(span)
             | Self::Subtract(span)
             | Self::Multiply(span)
