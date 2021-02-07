@@ -617,7 +617,7 @@ impl BinaryOperator {
             | Self::Equal(span)
             | Self::NotEqual(span)
             | Self::And(span)
-            | Self::Or(span) => span
+            | Self::Or(span) => span,
         }
     }
 
@@ -638,25 +638,33 @@ pub enum UnaryOperator {
 }
 
 impl UnaryOperator {
-    pub fn start(&self) -> usize {
+    pub fn span(&self) -> Span {
         match self {
             Self::Negate(span) | Self::Not(span) | Self::Length(span) | Self::BitwiseNot(span) => {
-                span.start
+                *span
             }
         }
+    }
+    pub fn start(&self) -> usize {
+        self.span().start
+    }
+    pub fn end(&self) -> usize {
+        self.span().end
     }
 }
 
 #[cfg(test)]
 mod test {
+    use core::panic;
+
     use super::*;
-    
+
     #[test]
     fn assign_bin_op_span() {
         let block = parse_lua("i = 1 - 1");
         assert_eq!(block.start(), Some(0));
         assert_eq!(block.end(), Some(9));
-        let first_stmt =  block.0.first().unwrap();
+        let first_stmt = block.0.first().unwrap();
         match &first_stmt.statement {
             Statement::Assignment {
                 targets,
@@ -673,37 +681,34 @@ mod test {
                 let bin = values.first().unwrap();
                 match bin {
                     ExpListItem::Expr(exp) => match exp {
-                        Expression::BinOp {
-                            left,
-                            op,
-                            right,
-                        } => {
+                        Expression::BinOp { left, op, right } => {
                             assert_eq!(left.start(), 4);
                             assert_eq!(left.end(), 5);
                             assert_eq!(op.start(), 6);
                             assert_eq!(op.end(), 7);
                             assert_eq!(right.start(), 8);
                             assert_eq!(right.end(), 9);
-                        },
-                        _ => panic!("Expected binary operation")
+                        }
+                        _ => panic!("Expected binary operation"),
                     },
                     _ => panic!("Expected Expression"),
                 }
-            },
+            }
             _ => panic!("Expected Statement::Assignment"),
         }
-        
     }
     #[test]
     fn if_break_goto() {
-        let block = parse_lua("if 1 // 2 == 99 then
+        let block = parse_lua(
+            "if 1 // 2 == 99 then
     break
 else
     goto top
-end");
+end",
+        );
         assert_eq!(block.start(), Some(0));
         assert_eq!(block.end(), Some(52));
-        let first_stmt =  block.0.first().unwrap();
+        let first_stmt = block.0.first().unwrap();
         match &first_stmt.statement {
             Statement::If(If {
                 if_span,
@@ -719,10 +724,15 @@ end");
                 assert_eq!(if_span.end, 2);
                 assert_eq!(test.start(), 3);
                 assert_eq!(test.end(), 15);
-                if let Expression::BinOp { left, op, right} = test {
+                if let Expression::BinOp { left, op, right } = test {
                     assert_eq!(left.start(), 3);
                     assert_eq!(left.end(), 9);
-                    if let Expression::BinOp { left: left2, op: op2, right: right2 } = left.as_ref() {
+                    if let Expression::BinOp {
+                        left: left2,
+                        op: op2,
+                        right: right2,
+                    } = left.as_ref()
+                    {
                         assert_eq!(left2.start(), 3);
                         assert_eq!(left2.end(), 4);
                         assert_eq!(op2.start(), 5);
@@ -744,8 +754,10 @@ end");
                 let el = else_span.unwrap();
                 assert_eq!(el.start, 31);
                 assert_eq!(el.end, 35);
-                
-                if let Statement::GoTo { goto_span, label } = catch_all.as_ref().unwrap().0.first().unwrap() {
+
+                if let Statement::GoTo { goto_span, label } =
+                    catch_all.as_ref().unwrap().0.first().unwrap()
+                {
                     assert_eq!(goto_span.start, 40);
                     assert_eq!(goto_span.end, 44);
                     assert_eq!(label.start(), 45);
@@ -755,10 +767,99 @@ end");
                 }
                 assert_eq!(end_span.start, 49);
                 assert_eq!(end_span.end, 52);
-            },
+            }
             _ => panic!("Expected Statement::If"),
         }
-        
+    }
+
+    #[test]
+    fn func_spans() {
+        let block = parse_lua(
+            "local function name(arg1, arg2)
+    return not (arg1 > arg2)
+end",
+        );
+        assert_eq!(block.start(), Some(0));
+        assert_eq!(block.end(), Some(64));
+        if let Statement::Function {
+            local,
+            function,
+            name,
+            body,
+        } = &block.0.first().unwrap().statement
+        {
+            let l = local.as_ref().unwrap();
+            assert_eq!(l.start, 0);
+            assert_eq!(l.end, 5);
+            assert_eq!(function.start, 6);
+            assert_eq!(function.end, 14);
+            let n = name.segments.first().unwrap();
+            if let FuncNamePart::Name(n) = n {
+                assert_eq!(n.start(), 15);
+                assert_eq!(n.end(), 19);
+            } else {
+                panic!("expected name");
+            }
+            assert_eq!(body.open_paren_span.start, 19);
+            assert_eq!(body.open_paren_span.end, 20);
+            let mut pars = body.par_list.parts.iter();
+            if let ParListPart::Name(a1) = pars.next().unwrap() {
+                assert_eq!(a1.start(), 20);
+                assert_eq!(a1.end(), 24);
+            } else {
+                panic!("expected name");
+            }
+            if let ParListPart::Comma(sp) = pars.next().unwrap() {
+                assert_eq!(sp.start, 24);
+                assert_eq!(sp.end, 25);
+            } else {
+                panic!("expected comma");
+            }
+            if let ParListPart::Name(a2) = pars.next().unwrap() {
+                assert_eq!(a2.start(), 26);
+                assert_eq!(a2.end(), 30);
+            } else {
+                panic!("expected name");
+            }
+            assert_eq!(body.close_paren_span.start, 30);
+            assert_eq!(body.close_paren_span.end, 31);
+            assert_eq!(body.block.0.len(), 1);
+            if let Statement::Return(ret) = body.block.0.first().unwrap() {
+                assert_eq!(ret.return_span.start, 36);
+                assert_eq!(ret.return_span.end, 42);
+                let val = ret.exprs.first().unwrap();
+                if let ExpListItem::Expr(Expression::UnaryOp { op, exp }) = val {
+                    assert_eq!(op.start(), 43);
+                    assert_eq!(op.end(), 46);
+                    if let Expression::Parened {open_span, expr: bin, close_span} = exp.as_ref() {
+                        assert_eq!(open_span.start, 47);
+                        assert_eq!(open_span.end, 48);
+                        if let Expression::BinOp { left, op, right } = bin.as_ref() {
+                            assert_eq!(left.start(), 48);
+                            assert_eq!(left.end(), 52);
+                            assert_eq!(op.start(), 53);
+                            assert_eq!(op.end(), 54);
+                            assert_eq!(right.start(), 55);
+                            assert_eq!(right.end(), 59);
+                        } else {
+                            panic!("Expected binary operation")
+                        }
+                        assert_eq!(close_span.start, 59);
+                        assert_eq!(close_span.end, 60);
+                    } else {
+                        panic!("expected unary operation");
+                    }
+                } else {
+                    panic!("expected unary op found {:#?}", val);
+                }
+            } else {
+                panic!()
+            }
+            assert_eq!(body.end_span.start, 61);
+            assert_eq!(body.end_span.end, 64);
+        } else {
+            panic!("expected function");
+        }
     }
 
     fn parse_lua<'a>(lua: &'a str) -> BlockWithComments<'a> {
