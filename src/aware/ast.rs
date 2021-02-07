@@ -128,10 +128,7 @@ impl<'a> Statement<'a> {
                     Some(function.start)
                 }
             }
-            Self::Return(ret_stat) => Some(
-                ret_stat.return_span.start
-                
-            ),
+            Self::Return(ret_stat) => Some(ret_stat.return_span.start),
             Self::Empty(span)
             | Self::Break(span)
             | Self::Label {
@@ -758,7 +755,6 @@ end",
                 if let Statement::Break(sp) = cons {
                     assert_eq!(sp.start, 25);
                     assert_eq!(sp.end, 30);
-                    
                 }
                 let el = else_span.unwrap();
                 assert_eq!(el.start, 31);
@@ -766,9 +762,7 @@ end",
                 let ca = catch_all.as_ref().unwrap().0.first().unwrap();
                 assert_eq!(ca.start(), Some(40));
                 assert_eq!(ca.end(), Some(48));
-                if let Statement::GoTo { goto_span, label } =
-                    ca
-                {
+                if let Statement::GoTo { goto_span, label } = ca {
                     assert_eq!(goto_span.start, 40);
                     assert_eq!(goto_span.end, 44);
                     assert_eq!(label.start(), 45);
@@ -849,7 +843,12 @@ end",
                 if let ExpListItem::Expr(Expression::UnaryOp { op, exp }) = val {
                     assert_eq!(op.start(), 43);
                     assert_eq!(op.end(), 46);
-                    if let Expression::Parened {open_span, expr: bin, close_span} = exp.as_ref() {
+                    if let Expression::Parened {
+                        open_span,
+                        expr: bin,
+                        close_span,
+                    } = exp.as_ref()
+                    {
                         assert_eq!(open_span.start, 47);
                         assert_eq!(open_span.end, 48);
                         if let Expression::BinOp { left, op, right } = bin.as_ref() {
