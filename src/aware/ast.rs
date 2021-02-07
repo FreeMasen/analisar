@@ -129,11 +129,8 @@ impl<'a> Statement<'a> {
                 }
             }
             Self::Return(ret_stat) => Some(
-                ret_stat
-                    .exprs
-                    .last()
-                    .map(ExpListItem::end)
-                    .unwrap_or(ret_stat.return_span.end),
+                ret_stat.return_span.start
+                
             ),
             Self::Empty(span)
             | Self::Break(span)
@@ -665,6 +662,8 @@ mod test {
         assert_eq!(block.start(), Some(0));
         assert_eq!(block.end(), Some(9));
         let first_stmt = block.0.first().unwrap();
+        assert_eq!(first_stmt.start(), Some(0));
+        assert_eq!(first_stmt.end(), Some(9));
         match &first_stmt.statement {
             Statement::Assignment {
                 targets,
@@ -709,6 +708,8 @@ end",
         assert_eq!(block.start(), Some(0));
         assert_eq!(block.end(), Some(52));
         let first_stmt = block.0.first().unwrap();
+        assert_eq!(first_stmt.statement.start(), Some(0));
+        assert_eq!(first_stmt.statement.end(), Some(52));
         match &first_stmt.statement {
             Statement::If(If {
                 if_span,
@@ -781,12 +782,15 @@ end",
         );
         assert_eq!(block.start(), Some(0));
         assert_eq!(block.end(), Some(64));
+        let func = &block.0.first().unwrap().statement;
+        assert_eq!(func.start(), Some(0));
+        assert_eq!(func.end(), Some(64));
         if let Statement::Function {
             local,
             function,
             name,
             body,
-        } = &block.0.first().unwrap().statement
+        } = func
         {
             let l = local.as_ref().unwrap();
             assert_eq!(l.start, 0);
@@ -824,7 +828,11 @@ end",
             assert_eq!(body.close_paren_span.start, 30);
             assert_eq!(body.close_paren_span.end, 31);
             assert_eq!(body.block.0.len(), 1);
-            if let Statement::Return(ret) = body.block.0.first().unwrap() {
+            let ret_stat = body.block.0.first().unwrap();
+            assert_eq!(ret_stat.start(), Some(36));
+            assert_eq!(ret_stat.end(), Some(60));
+
+            if let Statement::Return(ret) = ret_stat {
                 assert_eq!(ret.return_span.start, 36);
                 assert_eq!(ret.return_span.end, 42);
                 let val = ret.exprs.first().unwrap();

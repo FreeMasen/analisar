@@ -155,6 +155,28 @@
         {
             "type": "lldb",
             "request": "launch",
+            "name": "Debug unit tests in library 'func_spans'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=analisar"
+                ],
+                "filter": {
+                    "name": "analisar",
+                    "kind": "lib"
+                }
+            },
+            "args": ["func_spans", "--nocapture"],
+            "env": {
+                "RUST_LOG": "analisar=trace"
+            },
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
             "name": "Debug example 'hello_world'",
             "cargo": {
                 "args": [
