@@ -100,7 +100,7 @@ impl<'a> Parser<'a> {
         Ok(Block(statements))
     }
 
-    pub fn statement(&mut self) -> R<Statement<'a>> {
+    fn statement(&mut self) -> R<Statement<'a>> {
         trace!("statement {:?}, {:?}", self.look_ahead, self.look_ahead2);
         match self.look_ahead() {
             Some(Token::Punct(Punct::SemiColon)) => {
@@ -155,7 +155,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn assignment(&mut self, local: bool) -> R<Statement<'a>> {
+    fn assignment(&mut self, local: bool) -> R<Statement<'a>> {
         trace!(
             "assignment({}) {:?}, {:?}",
             local,
@@ -169,7 +169,7 @@ impl<'a> Parser<'a> {
         self.assign_cont(local, start)
     }
 
-    pub fn assign_cont(&mut self, local: bool, start: Expression<'a>) -> R<Statement<'a>> {
+    fn assign_cont(&mut self, local: bool, start: Expression<'a>) -> R<Statement<'a>> {
         trace!(
             "assign_cont({:?}, {:?}) {:?}, {:?}",
             local,
@@ -197,7 +197,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub fn label(&mut self) -> R<Statement<'a>> {
+    fn label(&mut self) -> R<Statement<'a>> {
         trace!("label {:?}, {:?}", self.look_ahead, self.look_ahead2);
         self.expect_punct(Punct::DoubleColon)?;
         let name = self.name()?;
@@ -205,20 +205,20 @@ impl<'a> Parser<'a> {
         Ok(Statement::Label(name))
     }
 
-    pub fn break_stmt(&mut self) -> R<Statement<'a>> {
+    fn break_stmt(&mut self) -> R<Statement<'a>> {
         trace!("break_stmt {:?}, {:?}", self.look_ahead, self.look_ahead2);
         self.expect_keyword(Keyword::Break)?;
         Ok(ast::Statement::Break)
     }
 
-    pub fn go_to(&mut self) -> R<Statement<'a>> {
+    fn go_to(&mut self) -> R<Statement<'a>> {
         trace!("go_to {:?}, {:?}", self.look_ahead, self.look_ahead2);
         self.expect_keyword(Keyword::GoTo)?;
         let name = self.name()?;
         Ok(Statement::GoTo(name))
     }
 
-    pub fn do_stmt(&mut self) -> R<Statement<'a>> {
+    fn do_stmt(&mut self) -> R<Statement<'a>> {
         trace!("do_stmt {:?}, {:?}", self.look_ahead, self.look_ahead2);
         self.expect_keyword(Keyword::Do)?;
         let block = self.block()?;
@@ -369,7 +369,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub fn func_body(&mut self) -> R<FuncBody<'a>> {
+    fn func_body(&mut self) -> R<FuncBody<'a>> {
         trace!("func_body {:?}, {:?}", self.look_ahead, self.look_ahead2);
         self.expect_punct(Punct::OpenParen)?;
         let par_list = self.par_list()?;
@@ -405,7 +405,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn par_list(&mut self) -> R<ParList<'a>> {
+    fn par_list(&mut self) -> R<ParList<'a>> {
         trace!("par_list {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let mut names = Vec::new();
         let var_args = loop {
@@ -427,13 +427,13 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub fn name(&mut self) -> R<Name<'a>> {
+    fn name(&mut self) -> R<Name<'a>> {
         trace!("name {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let name = self.expect_name()?;
         Ok(Name { name, attr: None })
     }
 
-    pub fn eat_name_attr(&mut self) -> R<Option<Cow<'a, str>>> {
+    fn eat_name_attr(&mut self) -> R<Option<Cow<'a, str>>> {
         trace!(
             "eat_name_attr {:?}, {:?}",
             self.look_ahead,
@@ -451,7 +451,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn expect_name(&mut self) -> R<Cow<'a, str>> {
+    fn expect_name(&mut self) -> R<Cow<'a, str>> {
         trace!("expect_name {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let name = if let Some(Token::Name(name)) = self.look_ahead() {
             name.clone()
@@ -469,7 +469,7 @@ impl<'a> Parser<'a> {
         Ok(name)
     }
 
-    pub fn exp_list(&mut self) -> R<Vec<Expression<'a>>> {
+    fn exp_list(&mut self) -> R<Vec<Expression<'a>>> {
         trace!("exp_list {:?}, {:?}", self.look_ahead, self.look_ahead2);
         let first = self.exp()?;
         let mut ret = vec![first];
@@ -741,7 +741,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn next_token(&mut self) -> Option<Item<'a>> {
+    fn next_token(&mut self) -> Option<Item<'a>> {
         use std::mem::replace;
         let mut next2 = self.lex.next();
         if self.capture_tokens {
