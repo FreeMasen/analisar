@@ -1,3 +1,72 @@
+//! # Analisar
+//! 
+//! A Lua parser for Rust
+//! 
+//! ## Usage
+//! 
+//! This crate provides 3 different APIs for parsing lua. 
+//! 
+//! ### Parser
+//! 
+//! The first is a fairly standard parser over a fairly standard AST which provides
+//! no context at all about whitespace or the position of punctuation or keywords.
+//! The provided AST is designed to represent the intent of the program over anything else
+//! 
+//! This kind of parser could be used to build a tree walking interpreter. Here is an example:
+//! 
+//! ```rust
+//! use analisar::{Parser, ast::{Statement, Expression}};
+//! 
+//! let lua = "print('hello world')";
+//! let mut p = Parser::new(lua.as_bytes());
+//! let stmt = p.next().unwrap().unwrap();
+//! assert!(matches!(stmt, Statement::Expression(Expression::FuncCall(_))));
+//! ```
+//! 
+//! ### TokenBufferParser
+//! 
+//! This is one is a bit of a hybrid of the other two parsers provided by this crate. It provides
+//! both a tree of Statement/Expressions but also the raw tokens represented by a given Statement.
+//! 
+//! Here is an example of this kind of parser:
+//! 
+//! ```rust
+//! use analisar::{TokenBufferParser, ast::{Statement, Expression}};
+//! 
+//! let lua = "
+//! -- print out hello world to stdout
+//! print(--[[ why!!! ]]'hello world' --[[seriously???]])";
+//! let mut p = TokenBufferParser::new(lua.as_bytes());
+//! let (tokens, stmt) = p.next().unwrap().unwrap();
+//! assert_eq!(tokens.len(), 7);
+//! assert!(matches!(stmt, Statement::Expression(Expression::FuncCall(_))));
+//! ```
+//! 
+//! As you can see the output of the `Statement::Expression` is exactly the same as before,
+//! however there is also a `Vec` of tokens provided. 
+//! 
+//! ### aware::Parser
+//! 
+//! The final parser that this crate provides is a fully context aware parser. Let's look
+//! at an example of that the output of this one looks like.
+//! 
+//! ```rust
+//! use analisar::aware::{Parser, ast::{Statement, Expression}};
+//! 
+//! let lua = "print(('hello world')) -- print the string 'hello world' to stdout";
+//! let mut p = Parser::new(lua.as_bytes());
+//! let stmt = p.next().unwrap().unwrap();
+//! assert!(matches!(stmt.statement, Statement::Expression(Expression::FuncCall(_))));
+//! ```
+//!
+//! Notice this one looks quite a bit different from the other two. First of all the function call's name
+//! has an associated `Span` which represents to byte offsets for the token in the original string, you'll
+//! notice similar spans across each entry in this tree. Another thing it provides is a `Parened` expression,
+//! for representing when an expression has been put in parentheses. Finally we see the comments that apply to
+//! this statement are also provided. With all 3 of these additions it would be possible to fully
+//! reconstruct the tokens into the order they appeared originally, which would be handy it you were building
+//! a code formatter or a document generator.
+//! 
 use std::borrow::Cow;
 
 use ast::{
@@ -9,6 +78,7 @@ use lex_lua::{Item, Keyword, Punct, SpannedLexer, Token};
 use log::trace;
 
 pub mod ast;
+/// A module for whitespace & comment aware parsing
 pub mod aware;
 pub mod error;
 pub use error::Error;
@@ -27,6 +97,7 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    /// Construct a new parser with the provided bytes of lua
     pub fn new(bytes: &'a [u8]) -> Self {
         let mut lex = SpannedLexer::new(bytes);
         let mut look_ahead = None;
@@ -79,7 +150,7 @@ impl<'a> Parser<'a> {
             capture_tokens: true,
         }
     }
-
+    /// Get the next lua statement from the lua text provided
     pub fn next(&mut self) -> Option<R<Statement<'a>>> {
         if self.look_ahead.is_none() {
             return None;
@@ -826,8 +897,8 @@ impl<'a> Parser<'a> {
 }
 
 /// Similar to the Parser, on a call to `next`
-/// will return a vector of the raw tokens from `lex_lua`
-/// along with the parsed `Statement`
+/// will return a vector of the raw tokens from [`lex_lua`](https://docs.rs/lex_lua)
+/// along with the parsed [`Statement`]
 pub struct TokenBufferParser<'a> {
     inner: Parser<'a>,
 }
@@ -838,7 +909,8 @@ impl<'a> TokenBufferParser<'a> {
         Self { inner }
     }
     /// Returns a tuple, the first element will be a `Vec` of the raw
-    /// `lex_lua::Item`s and the second element will be the parsed `Statement`
+    /// [`lex_lua::Item`](https://docs.rs/lex_lua)s and the second
+    /// element will be the parsed [`Statement`]
     pub fn next(&mut self) -> Option<R<(Vec<Item<'a>>, Statement<'a>)>> {
         let inner_next = self.inner.next()?;
         match inner_next {
