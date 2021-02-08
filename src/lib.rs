@@ -8,7 +8,7 @@ use ast::{
 use lex_lua::{Item, Keyword, Punct, SpannedLexer, Token};
 use log::trace;
 
-mod ast;
+pub mod ast;
 pub mod aware;
 pub mod error;
 pub use error::Error;
